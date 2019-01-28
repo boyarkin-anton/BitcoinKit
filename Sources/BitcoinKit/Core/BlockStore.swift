@@ -43,6 +43,15 @@ public struct Payment {
     public let from: Address
     public let to: Address
     public let txid: Data
+    
+    public init(state: State, index: Int64, amount: Int64, from: Address, to: Address, txid: Data) {
+        self.state = state
+        self.index = index
+        self.amount = amount
+        self.from = from
+        self.to = to
+        self.txid = txid
+    }
 }
 
 extension Payment: Equatable {
