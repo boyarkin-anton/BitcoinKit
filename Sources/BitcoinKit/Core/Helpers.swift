@@ -52,3 +52,9 @@ func publicKeyHashToAddress(_ hash: Data) -> String {
     let address = Base58.encode(hash + checksum)
     return address
 }
+
+public class BitcoinKitHelpers {
+    static public func publicKeyToAddress(from hash: Data) -> String {
+        return publicKeyHashToAddress(hash)
+    }
+}
