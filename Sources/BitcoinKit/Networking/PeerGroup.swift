@@ -35,6 +35,8 @@ public class PeerGroup: PeerDelegate {
 
     private var filters = [Data]()
     private var transactions = [Transaction]()
+    
+    private var currentPeerID: Int = 0
 
     public init(blockChain: BlockChain, maxConnections: Int = 1) {
         self.blockChain = blockChain
@@ -44,7 +46,8 @@ public class PeerGroup: PeerDelegate {
     public func start() {
         let network = blockChain.network
         for _ in peers.count..<maxConnections {
-            let peer = Peer(host: network.dnsSeeds[1], network: network)
+            let peer = Peer(host: network.dnsSeeds[currentPeerID % network.dnsSeeds.count], network: network)
+            currentPeerID += 1
             peer.delegate = self
             peer.connect()
 
