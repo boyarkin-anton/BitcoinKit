@@ -24,4 +24,5 @@ Pod::Spec.new do |spec|
                                'OTHER_SWIFT_FLAGS' => '-D BitcoinKitXcode' }
   spec.dependency 'secp256k1_swift', '~> 1.0.3'
   spec.dependency 'GRKOpenSSLFramework', '~> 1.0.2.15'
+  spec.dependency 'GRDB.swift', '~> 3.6.2'
 end
