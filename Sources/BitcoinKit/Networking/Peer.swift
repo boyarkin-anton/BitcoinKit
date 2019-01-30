@@ -38,6 +38,10 @@ public class Peer: NSObject, StreamDelegate {
     public weak var delegate: PeerDelegate?
     
     private var runLoop: RunLoop?
+    private var timer: Timer?
+    
+    private let interval = 10.0
+    private var isConnected = false
 
     let context = Context()
     var latestBlockHash: Data
@@ -108,6 +112,19 @@ public class Peer: NSObject, StreamDelegate {
 
         inputStream.open()
         outputStream.open()
+        
+        if #available(iOSApplicationExtension 10.0, *) {
+            let timer = Timer(timeInterval: interval, repeats: true, block: { _ in
+                if self.isConnected == false {
+                    self.log("timeout: \(self.interval) s")
+                    self.disconnect()
+                }
+            })
+            self.timer = timer
+            
+            RunLoop.current.add(timer, forMode: .commonModes)
+            RunLoop.current.run()
+        }
     }
 
     public func disconnect() {
@@ -124,6 +141,8 @@ public class Peer: NSObject, StreamDelegate {
         readStream = nil
         writeStream = nil
         runLoop = nil
+        timer?.invalidate()
+        timer = nil
 
         log("disconnected")
         self.delegate?.peerDidDisconnect(self)
@@ -154,6 +173,7 @@ public class Peer: NSObject, StreamDelegate {
         case let stream as InputStream:
             switch eventCode {
             case .openCompleted:
+                self.isConnected = true
                 log("socket connected")
             case .hasBytesAvailable:
                 readAvailableBytes(stream: stream)
