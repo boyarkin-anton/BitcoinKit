@@ -36,6 +36,8 @@ public class Peer: NSObject, StreamDelegate {
     public let network: Network
 
     public weak var delegate: PeerDelegate?
+    
+    private var runLoop: RunLoop?
 
     let context = Context()
     var latestBlockHash: Data
@@ -81,6 +83,17 @@ public class Peer: NSObject, StreamDelegate {
     }
 
     public func connect() {
+        if runLoop == nil {
+            DispatchQueue.global(qos: .userInitiated).async {
+                self.runLoop = .current
+                self.connectAsync()
+            }
+        } else {
+            log("ALREADY CONNECTED")
+        }
+    }
+
+    private func connectAsync() {
         log("connecting")
 
         CFStreamCreatePairWithSocketToHost(kCFAllocatorDefault, host as CFString, port, &readStream, &writeStream)
@@ -110,6 +123,7 @@ public class Peer: NSObject, StreamDelegate {
         outputStream.close()
         readStream = nil
         writeStream = nil
+        runLoop = nil
 
         log("disconnected")
         self.delegate?.peerDidDisconnect(self)

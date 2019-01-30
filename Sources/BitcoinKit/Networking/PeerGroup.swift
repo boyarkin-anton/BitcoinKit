@@ -37,34 +37,43 @@ public class PeerGroup: PeerDelegate {
     private var transactions = [Transaction]()
     
     private var currentPeerID: Int = 0
+    
+    private let peersQueue: DispatchQueue
 
     public init(blockChain: BlockChain, maxConnections: Int = 1) {
         self.blockChain = blockChain
         self.maxConnections = maxConnections
+        
+        peersQueue = DispatchQueue(label: "PeerGroup Local Queue", qos: .userInitiated)
     }
 
     public func start() {
-        let network = blockChain.network
-        for _ in peers.count..<maxConnections {
-            let peer = Peer(host: network.dnsSeeds[currentPeerID % network.dnsSeeds.count], network: network)
-            currentPeerID += 1
-            peer.delegate = self
-            peer.connect()
-
-            peers[peer.host] = peer
+        peersQueue.async {
+            let network = self.blockChain.network
+            for _ in self.peers.count..<self.maxConnections {
+                let peer = Peer(host: network.dnsSeeds[self.currentPeerID % network.dnsSeeds.count], network: network)
+                peer.delegate = self
+                peer.connect()
+                
+                self.peers[peer.host] = peer
+            }
+            
+            self.currentPeerID += 1
+            
+            self.delegate?.peerGroupDidStart(self)
         }
-
-        delegate?.peerGroupDidStart(self)
     }
 
     public func stop() {
-        for peer in peers.values {
-            peer.delegate = nil
-            peer.disconnect()
-        }
-        peers.removeAll()
+        peersQueue.async {
+            for peer in self.peers.values {
+                peer.delegate = nil
+                peer.disconnect()
+            }
+            self.peers.removeAll()
 
-        delegate?.peerGroupDidStop(self)
+            self.delegate?.peerGroupDidStop(self)
+        }
     }
 
     // filter: pubkey, pubkeyhash, scripthash, etc...
@@ -74,7 +83,9 @@ public class PeerGroup: PeerDelegate {
 
     public func sendTransaction(transaction: Transaction) {
         if let peer = peers.values.first {
-            peer.sendTransaction(transaction: transaction)
+            peersQueue.async {
+                peer.sendTransaction(transaction: transaction)
+            }
         } else {
             transactions.append(transaction)
             start()
@@ -82,13 +93,15 @@ public class PeerGroup: PeerDelegate {
     }
 
     public func peerDidConnect(_ peer: Peer) {
-        if peers.filter({ $0.value.context.isSyncing }).isEmpty {
-            let latestBlockHash = blockChain.latestBlockHash()
-            peer.startSync(filters: filters, latestBlockHash: latestBlockHash)
-        }
-        if !transactions.isEmpty {
-            for transaction in transactions {
-                peer.sendTransaction(transaction: transaction)
+        peersQueue.async {
+            if self.peers.filter({ $0.value.context.isSyncing }).isEmpty {
+                let latestBlockHash = self.blockChain.latestBlockHash()
+                peer.startSync(filters: self.filters, latestBlockHash: latestBlockHash)
+            }
+            if !self.transactions.isEmpty {
+                for transaction in self.transactions {
+                    peer.sendTransaction(transaction: transaction)
+                }
             }
         }
     }
@@ -101,7 +114,9 @@ public class PeerGroup: PeerDelegate {
     public func peer(_ peer: Peer, didReceiveVersionMessage message: VersionMessage) {
         if message.userAgent?.value.contains("Bitcoin ABC:0.16") == true {
             print("it's old version. Let's try to disconnect and connect to aother peer.")
-            peer.disconnect()
+            peersQueue.async {
+                peer.disconnect()
+            }
         }
     }
 
