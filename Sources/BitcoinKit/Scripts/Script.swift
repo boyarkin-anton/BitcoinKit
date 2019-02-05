@@ -27,7 +27,7 @@ import Foundation
 
 public class Script {
     // An array of Data objects (pushing data) or UInt8 objects (containing opcodes)
-    private var chunks: [ScriptChunk]
+    public var chunks: [ScriptChunk]
 
     // Cached serialized representations for -data and -string methods.
     private var dataCache: Data?
@@ -488,5 +488,6 @@ extension Script: CustomStringConvertible {
 }
 
 enum ScriptError: Error {
+    case wrongScriptLength, wrongSequence
     case error(String)
 }

@@ -96,7 +96,8 @@ public class PeerGroup: PeerDelegate {
         peersQueue.async {
             if self.peers.filter({ $0.value.context.isSyncing }).isEmpty {
                 let latestBlockHash = self.blockChain.latestBlockHash()
-                peer.startSync(filters: self.filters, latestBlockHash: latestBlockHash)
+                let latestBlockHeight = self.blockChain.latestBlockHeight()
+                peer.startSync(filters: self.filters, latestBlockHash: latestBlockHash, latestBlockHeight: latestBlockHeight)
             }
             if !self.transactions.isEmpty {
                 for transaction in self.transactions {
@@ -120,8 +121,8 @@ public class PeerGroup: PeerDelegate {
         }
     }
 
-    public func peer(_ peer: Peer, didReceiveMerkleBlockMessage message: MerkleBlockMessage, hash: Data) {
-        try! blockChain.addMerkleBlock(message, hash: hash)
+    public func peer(_ peer: Peer, didReceiveMerkleBlockMessage message: MerkleBlockMessage, hash: Data, height: Int32) {
+        try! blockChain.addMerkleBlock(message, hash: hash, height: height)
     }
 
     public func peer(_ peer: Peer, didReceiveTransaction transaction: Transaction, hash: Data) {

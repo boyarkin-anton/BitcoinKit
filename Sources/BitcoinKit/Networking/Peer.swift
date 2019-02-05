@@ -53,6 +53,7 @@ public class Peer: NSObject, StreamDelegate {
 
         var pingTime = Date()
         var estimatedHeight: Int32 = 0
+        var currentHeight: Int32 = 0
 
         var sentVersion = false
         var sentVerack = false
@@ -65,6 +66,7 @@ public class Peer: NSObject, StreamDelegate {
 
         var isSyncing = false
         var inventoryItems = [Data: InventoryItem]()
+        var blocks = [Data: Int32]()
     }
 
     private var readStream: Unmanaged<CFReadStream>?
@@ -148,8 +150,9 @@ public class Peer: NSObject, StreamDelegate {
         self.delegate?.peerDidDisconnect(self)
     }
 
-    public func startSync(filters: [Data] = [], latestBlockHash: Data) {
+    public func startSync(filters: [Data] = [], latestBlockHash: Data, latestBlockHeight: Int32) {
         self.latestBlockHash = latestBlockHash
+        self.context.currentHeight = latestBlockHeight
         context.isSyncing = true
 
         if !self.context.sentFilterLoad {
@@ -441,14 +444,18 @@ public class Peer: NSObject, StreamDelegate {
         }
         sendGetDataMessage(message: InventoryMessage(count: VarInt(filterdItems.count), inventoryItems: filterdItems))
         for item in filterdItems {
-            context.inventoryItems[Data(item.hash.reversed())] = item
+            let blockHash = Data(item.hash.reversed())
+            context.currentHeight += 1
+            context.inventoryItems[blockHash] = item
+            context.blocks[blockHash] = context.currentHeight
         }
     }
 
     private func handleBlockMessage(payload: Data) {
         let block = BlockMessage.deserialize(payload)
         let blockHash = Data(Crypto.sha256sha256(payload.prefix(80)).reversed())
-        delegate?.peer(self, didReceiveBlockMessage: block, hash: blockHash)
+        let blockHeight = context.blocks[Data(blockHash.reversed())] ?? 0
+        delegate?.peer(self, didReceiveBlockMessage: block, hash: blockHash, height: blockHeight)
 
         context.inventoryItems[blockHash] = nil
         if context.inventoryItems.isEmpty {
@@ -460,7 +467,8 @@ public class Peer: NSObject, StreamDelegate {
     private func handleMerkleBlockMessage(payload: Data) {
         let merkleBlock = MerkleBlockMessage.deserialize(payload)
         let blockHash = Crypto.sha256sha256(payload.prefix(80))
-        delegate?.peer(self, didReceiveMerkleBlockMessage: merkleBlock, hash: blockHash)
+        let blockHeight = context.blocks[Data(blockHash.reversed())] ?? 0
+        delegate?.peer(self, didReceiveMerkleBlockMessage: merkleBlock, hash: blockHash, height: blockHeight)
 
         context.inventoryItems[Data(blockHash.reversed())] = nil
         if context.inventoryItems.isEmpty {
@@ -507,8 +515,8 @@ public protocol PeerDelegate: class {
     func peer(_ peer: Peer, didReceiveAddressMessage message: AddressMessage)
     func peer(_ peer: Peer, didReceiveGetDataMessage message: GetDataMessage)
     func peer(_ peer: Peer, didReceiveInventoryMessage message: InventoryMessage)
-    func peer(_ peer: Peer, didReceiveBlockMessage message: BlockMessage, hash: Data)
-    func peer(_ peer: Peer, didReceiveMerkleBlockMessage message: MerkleBlockMessage, hash: Data)
+    func peer(_ peer: Peer, didReceiveBlockMessage message: BlockMessage, hash: Data, height: Int32)
+    func peer(_ peer: Peer, didReceiveMerkleBlockMessage message: MerkleBlockMessage, hash: Data, height: Int32)
     func peer(_ peer: Peer, didReceiveTransaction transaction: Transaction, hash: Data)
     func peer(_ peer: Peer, didReceiveRejectMessage message: RejectMessage)
 }
@@ -520,8 +528,8 @@ extension PeerDelegate {
     public func peer(_ peer: Peer, didReceiveAddressMessage message: AddressMessage) {}
     public func peer(_ peer: Peer, didReceiveGetDataMessage message: GetDataMessage) {}
     public func peer(_ peer: Peer, didReceiveInventoryMessage message: InventoryMessage) {}
-    public func peer(_ peer: Peer, didReceiveBlockMessage message: BlockMessage, hash: Data) {}
-    public func peer(_ peer: Peer, didReceiveMerkleBlockMessage message: MerkleBlockMessage, hash: Data) {}
+    public func peer(_ peer: Peer, didReceiveBlockMessage message: BlockMessage, hash: Data, height: Int32) {}
+    public func peer(_ peer: Peer, didReceiveMerkleBlockMessage message: MerkleBlockMessage, hash: Data, height: Int32) {}
     public func peer(_ peer: Peer, didReceiveTransaction transaction: Transaction, hash: Data) {}
     public func peer(_ peer: Peer, didReceiveRejectMessage message: RejectMessage) {}
 }

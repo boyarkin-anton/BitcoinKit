@@ -29,6 +29,137 @@ import Foundation
 
 import GRDB
 
+public enum ScriptType: Int {
+    case unknown, p2pkh, p2pk, p2multi, p2sh, p2wsh, p2wpkh, p2wpkhSh
+    
+    var size: Int {
+        switch self {
+        case .p2pk: return 35
+        case .p2pkh: return 25
+        case .p2sh: return 23
+        case .p2wsh: return 34
+        case .p2wpkh: return 22
+        case .p2wpkhSh: return 23
+        default: return 0
+        }
+    }
+    
+    var keyLength: UInt8 {
+        switch self {
+        case .p2pk: return 0x21
+        case .p2pkh: return 0x14
+        case .p2sh: return 0x14
+        case .p2wsh: return 0x20
+        case .p2wpkh: return 0x14
+        case .p2wpkhSh: return 0x14
+        default: return 0
+        }
+    }
+    
+    var addressType: AddressType {
+        switch self {
+        case .p2sh, .p2wsh: return .scriptHash
+        default: return .pubkeyHash
+        }
+    }
+    
+    var witness: Bool {
+        return self == .p2wpkh || self == .p2wpkhSh || self == .p2wsh
+    }
+    
+}
+
+class AddressConverter {
+    enum ConversionError: Error {
+        case invalidChecksum
+        case invalidAddressLength
+        case unknownAddressType
+        case wrongAddressPrefix
+    }
+    
+    let network: Network
+    
+    init(network: Network) {
+        self.network = network
+    }
+    
+    func convert(keyHash: Data, type: ScriptType) throws -> Address {
+        let version: UInt8
+        let addressType: AddressType
+        switch type {
+        case .p2pkh, .p2pk:
+            version = network.pubkeyhash
+            addressType = .pubkeyHash
+        case .p2sh, .p2wpkhSh:
+            version = network.scripthash
+            addressType = .scriptHash
+        default: throw ConversionError.unknownAddressType
+        }
+        return try convertToLegacy(keyHash: keyHash, version: version, addressType: addressType)
+    }
+    
+    func convertToLegacy(keyHash: Data, version: UInt8, addressType: AddressType) throws -> LegacyAddress {
+        var withVersion = (Data([version])) + keyHash
+        let doubleSHA256 = Crypto.sha256sha256(withVersion)
+        let checksum = doubleSHA256.prefix(4)
+        withVersion += checksum
+        let base58 = Base58.encode(withVersion)
+        return try LegacyAddress(base58)
+    }
+    
+    func extract(from signatureScript: Data) -> Address? {
+        var payload: Data?
+        var validScriptType: ScriptType = ScriptType.unknown
+        let sigScriptCount = signatureScript.count
+        
+        var outputAddress: Address?
+        
+        if let script = Script(data: signatureScript), // PFromSH input {push-sig}{signature}{push-redeem}{script}
+            let chunkData = script.chunks.last?.scriptData,
+            let redeemScript = Script(data: chunkData),
+            let opCode = redeemScript.chunks.last?.opCode.value {
+            // parse PFromSH transaction input
+            var verifyChunkCode: UInt8 = opCode
+            if verifyChunkCode == OpCode.OP_ENDIF,
+                redeemScript.chunks.count > 1,
+                let opCode = redeemScript.chunks.suffix(2).first?.opCode {
+                
+                verifyChunkCode = opCode.value    // check pre-last chunk
+            }
+            if OpCode.pFromShCodes.contains(verifyChunkCode) {
+                payload = chunkData                                     //full script
+                validScriptType = .p2sh
+            }
+        }
+        
+        if payload == nil, sigScriptCount >= 106, signatureScript[0] >= 71, signatureScript[0] <= 74 {
+            // parse PFromPKH transaction input
+            let signatureOffset = signatureScript[0]
+            let pubKeyLength = signatureScript[Int(signatureOffset + 1)]
+            
+            if (pubKeyLength == 33 || pubKeyLength == 65) && sigScriptCount == signatureOffset + pubKeyLength + 2 {
+                payload = signatureScript.subdata(in: Int(signatureOffset + 2)..<sigScriptCount)    // public key
+                validScriptType = .p2pkh
+            }
+        }
+        if payload == nil, sigScriptCount == ScriptType.p2wpkhSh.size,
+            signatureScript[0] == 0x16,
+            (signatureScript[1] == 0 || (signatureScript[1] > 0x50 && signatureScript[1] < 0x61)),
+            signatureScript[2] == 0x14 {
+            // parse PFromWPKH-SH transaction input
+            payload = signatureScript.subdata(in: 1..<sigScriptCount)      // 0014{20-byte-key-hash}
+            validScriptType = .p2wpkhSh
+        }
+        if let payload = payload {
+            let keyHash = Crypto.sha256ripemd160(payload)
+            if let address = try? convert(keyHash: keyHash, type: validScriptType) {
+                outputAddress = address
+            }
+        }
+        return outputAddress
+    }
+}
+
 public struct Payment {
     public enum State {
         case sent
@@ -41,14 +172,21 @@ public struct Payment {
     public let from: Address
     public let to: Address
     public let txid: Data
+    public let lockTime: Int64
+    public let timestamp: Int64?
     
-    public init(state: State, index: Int64, amount: Int64, from: Address, to: Address, txid: Data) {
+    public let signatureScript: Data
+    
+    public init(state: State, index: Int64, amount: Int64, from: Address, to: Address, txid: Data, lockTime: Int64, timestamp: Int64?, signatureScript: Data) {
         self.state = state
         self.index = index
         self.amount = amount
         self.from = from
         self.to = to
         self.txid = txid
+        self.lockTime = lockTime
+        self.timestamp = timestamp
+        self.signatureScript = signatureScript
     }
 }
 
@@ -58,12 +196,153 @@ extension Payment: Equatable {
     }
 }
 
+class Block: Record {
+    var id: Data
+    var version: Int64
+    var prev_block: Data
+    var merkle_root: Data
+    var timestamp: Int64
+    var bits: Int64
+    var nonce: Int64
+    var txn_count: Int64
+    
+    init(id: Data, version: Int64, prev_block: Data, merkle_root: Data, timestamp: Int64, bits: Int64, nonce: Int64, txn_count: Int64) {
+        self.id = id
+        self.version = version
+        self.prev_block = prev_block
+        self.merkle_root = merkle_root
+        self.timestamp = timestamp
+        self.bits = bits
+        self.nonce = nonce
+        self.txn_count = txn_count
+        super.init()
+    }
+    
+    /// The table name
+    override class var databaseTableName: String {
+        return "block"
+    }
+    
+    /// The table columns
+    enum Columns: String, ColumnExpression {
+        case id, version, prev_block, merkle_root, timestamp, bits, nonce, txn_count
+    }
+    
+    /// Creates a record from a database row
+    required init(row: Row) {
+        id = row[Columns.id]
+        version = row[Columns.version]
+        prev_block = row[Columns.prev_block]
+        merkle_root = row[Columns.merkle_root]
+        timestamp = row[Columns.timestamp]
+        bits = row[Columns.bits]
+        nonce = row[Columns.nonce]
+        txn_count = row[Columns.txn_count]
+        super.init(row: row)
+    }
+    
+    /// The values persisted in the database
+    override func encode(to container: inout PersistenceContainer) {
+        container[Columns.id] = id
+        container[Columns.version] = version
+        container[Columns.prev_block] = prev_block
+        container[Columns.merkle_root] = merkle_root
+        container[Columns.timestamp] = timestamp
+        container[Columns.bits] = bits
+        container[Columns.nonce] = nonce
+        container[Columns.txn_count] = txn_count
+    }
+}
+
+class Merkleblock: Record {
+    var id: Data
+    var version: Int64
+    var prev_block: Data
+    var merkle_root: Data
+    var timestamp: Int64
+    var bits: Int64
+    var nonce: Int64
+    var total_transactions: Int64
+    var hash_count: Int64
+    var hashes: Data
+    var flag_count: Int64
+    var flags: Data
+    var height: Int64
+    
+    init(id: Data, version: Int64, prev_block: Data, merkle_root: Data, timestamp: Int64, bits: Int64, nonce: Int64, total_transactions: Int64, hash_count: Int64, hashes: Data, flag_count: Int64, flags: Data, height: Int64) {
+        self.id = id
+        self.version = version
+        self.prev_block = prev_block
+        self.merkle_root = merkle_root
+        self.timestamp = timestamp
+        self.bits = bits
+        self.nonce = nonce
+        self.total_transactions = total_transactions
+        self.hash_count = hash_count
+        self.hashes = hashes
+        self.flag_count = flag_count
+        self.flags = flags
+        self.height = height
+        super.init()
+    }
+    
+    /// The table name
+    override class var databaseTableName: String {
+        return "merkleblock"
+    }
+    
+    /// The table columns
+    enum Columns: String, ColumnExpression {
+        case id, version, prev_block, merkle_root, timestamp, bits, nonce, total_transactions, hash_count, hashes, flag_count, flags, height
+    }
+    
+    /// Creates a record from a database row
+    required init(row: Row) {
+        id = row[Columns.id]
+        version = row[Columns.version]
+        prev_block = row[Columns.prev_block]
+        merkle_root = row[Columns.merkle_root]
+        timestamp = row[Columns.timestamp]
+        bits = row[Columns.bits]
+        nonce = row[Columns.nonce]
+        total_transactions = row[Columns.total_transactions]
+        hash_count = row[Columns.hash_count]
+        hashes = row[Columns.hashes]
+        flag_count = row[Columns.flag_count]
+        flags = row[Columns.flags]
+        height = row[Columns.height]
+        super.init(row: row)
+    }
+    
+    /// The values persisted in the database
+    override func encode(to container: inout PersistenceContainer) {
+        container[Columns.id] = id
+        container[Columns.version] = version
+        container[Columns.prev_block] = prev_block
+        container[Columns.merkle_root] = merkle_root
+        container[Columns.timestamp] = timestamp
+        container[Columns.bits] = bits
+        container[Columns.nonce] = nonce
+        container[Columns.total_transactions] = total_transactions
+        container[Columns.hash_count] = hash_count
+        container[Columns.hashes] = hashes
+        container[Columns.flag_count] = flag_count
+        container[Columns.flags] = flags
+        container[Columns.height] = height
+    }
+    
+    override class var persistenceConflictPolicy: PersistenceConflictPolicy {
+        return PersistenceConflictPolicy(insert: .replace, update: .replace)
+    }
+}
+
 public protocol BlockStore {
     func addBlock(_ block: BlockMessage, hash: Data) throws
-    func addMerkleBlock(_ merkleBlock: MerkleBlockMessage, hash: Data) throws
+    func addMerkleBlock(_ merkleBlock: MerkleBlockMessage, hash: Data, height: Int32) throws
     func addTransaction(_ transaction: Transaction, hash: Data) throws
     func calculateBalance(address: Address) throws -> Int64
     func latestBlockHash() throws -> Data?
+    func latestBlockHeight() throws -> Int32?
 }
 
 public class SQLiteBlockStore: BlockStore {
@@ -73,80 +352,95 @@ public class SQLiteBlockStore: BlockStore {
     
     var dbPool: DatabasePool?
     let network: Network
+    var addressConverter: AddressConverter?
     
     private var statements = [String: String]()
     
     public init(network: Network) {
         self.network = network
+        self.addressConverter = AddressConverter(network: network)
         self.openDB()
     }
     
     func openDB() {
         let cachesDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         do {
-            dbPool = try DatabasePool(path: cachesDir.appendingPathComponent("\(self.network.scheme)-blockchain.sqlite").path)
+            dbPool = try DatabasePool(path: cachesDir.appendingPathComponent("\(self.network.scheme)-\(self.network.name)-blockchain.sqlite").path)
             try dbPool?.write { db in
+                
+                try db.create(table: "block", ifNotExists: true) { t in
+                    t.column("id", .blob).notNull()
+                    t.column("version", .integer).notNull()
+                    t.column("prev_block", .blob).notNull()
+                    t.column("merkle_root", .blob).notNull()
+                    t.column("timestamp", .integer).notNull()
+                    t.column("bits", .integer).notNull()
+                    t.column("nonce", .integer).notNull()
+                    t.column("txn_count", .integer).notNull()
+                    t.primaryKey(["id"])
+                }
+                
+                try db.create(table: "merkleblock", ifNotExists: true) { t in
+                    t.column("id", .blob).notNull()
+                    t.column("version", .integer).notNull()
+                    t.column("prev_block", .blob).notNull()
+                    t.column("merkle_root", .blob).notNull()
+                    t.column("timestamp", .integer).notNull()
+                    t.column("bits", .integer).notNull()
+                    t.column("nonce", .integer).notNull()
+                    t.column("total_transactions", .integer).notNull()
+                    t.column("hash_count", .integer).notNull()
+                    t.column("hashes", .blob).notNull()
+                    t.column("flag_count", .integer).notNull()
+                    t.column("flags", .blob).notNull()
+                    t.column("height", .integer).notNull()
+                    t.primaryKey(["id"])
+                }
+                
+                try db.create(table: "tx", ifNotExists: true) { t in
+                    t.column("id", .blob).notNull()
+                    t.column("version", .integer).notNull()
+                    t.column("flag", .integer).notNull()
+                    t.column("tx_in_count", .integer).notNull()
+                    t.column("tx_out_count", .integer).notNull()
+                    t.column("lock_time", .integer).notNull()
+                    t.primaryKey(["id"])
+                }
+                
+                try db.create(table: "txin", ifNotExists: true) { t in
+                    t.column("script_length", .integer).notNull()
+                    t.column("signature_script", .blob).notNull()
+                    t.column("sequence", .integer).notNull()
+                    t.column("tx_id", .blob).notNull()
+                    t.column("txout_id", .blob).notNull()
+                    t.column("address_id", .text)
+                    t.foreignKey(["tx_id"], references: "tx", columns: ["id"])
+                }
+                
+                try db.create(table: "txout", ifNotExists: true) { t in
+                    t.column("out_index", .integer).notNull()
+                    t.column("value", .integer).notNull()
+                    t.column("pk_script_length", .integer).notNull()
+                    t.column("pk_script", .blob).notNull()
+                    t.column("tx_id", .blob).notNull()
+                    t.column("address_id", .text)
+                    t.foreignKey(["tx_id"], references: "tx", columns: ["id"])
+                }
+                
                 try db.execute(
                     """
-         PRAGMA foreign_keys = ON;
-         CREATE TABLE IF NOT EXISTS block (
-         id BLOB NOT NULL PRIMARY KEY,
-         version INTEGER NOT NULL,
-         prev_block BLOB NOT NULL,
-         merkle_root BLOB NOT NULL,
-         timestamp INTEGER NOT NULL,
-         bits INTEGER NOT NULL,
-         nonce INTEGER NOT NULL,
-         txn_count INTEGER NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS merkleblock (
-         id BLOB NOT NULL PRIMARY KEY,
-         version INTEGER NOT NULL,
-         prev_block BLOB NOT NULL,
-         merkle_root BLOB NOT NULL,
-         timestamp INTEGER NOT NULL,
-         bits INTEGER NOT NULL,
-         nonce INTEGER NOT NULL,
-         total_transactions INTEGER NOT NULL,
-         hash_count INTEGER NOT NULL,
-         hashes BLOB NOT NULL,
-         flag_count INTEGER NOT NULL,
-         flags BLOB NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS tx (
-         id BLOB NOT NULL PRIMARY KEY,
-         version INTEGER NOT NULL,
-         flag INTEGER NOT NULL,
-         tx_in_count INTEGER NOT NULL,
-         tx_out_count INTEGER NOT NULL,
-         lock_time INTEGER NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS txin (
-         script_length INTEGER NOT NULL,
-         signature_script BLOB NOT NULL,
-         sequence INTEGER NOT NULL,
-         tx_id BLOB NOT NULL,
-         txout_id BLOB NOT NULL,
-         FOREIGN KEY(tx_id) REFERENCES tx(id)
-         );
-         CREATE TABLE IF NOT EXISTS txout (
-         out_index INTEGER NOT NULL,
-         value INTEGER NOT NULL,
-         pk_script_length INTEGER NOT NULL,
-         pk_script BLOB NOT NULL,
-         tx_id BLOB NOT NULL,
-         address_id TEXT,
-         FOREIGN KEY(tx_id) REFERENCES tx(id)
-         );
          CREATE VIEW IF NOT EXISTS view_tx AS
-         SELECT tx.id, txout.address_id, txout.out_index, txout.value, txin.txout_id from tx
-         LEFT JOIN txout on id = txout.tx_id
-         LEFT JOIN txin on id = txin.txout_id;
+         SELECT tx.id, txin.address_id AS in_address, txout.address_id AS out_address, txout.out_index, txout.value, txin.txout_id, tx.lock_time, merkleblock.timestamp, txin.script_length, txin.signature_script from tx
+         LEFT JOIN txout on tx.id = txout.tx_id
+         LEFT JOIN txin on tx.id = txin.tx_id
+         LEFT JOIN merkleblock ON tx.lock_time = merkleblock.height;
+
          CREATE VIEW IF NOT EXISTS view_utxo AS
-         SELECT tx.id, txout.address_id, txout.out_index, txout.value, txin.txout_id from tx
-         LEFT JOIN txout on id = txout.tx_id
-         LEFT JOIN txin on id = txin.txout_id
-         WHERE txout_id IS NULL;
+         SELECT tx.id, txin.address_id AS in_address, txout.address_id AS out_address, txout.out_index, txout.value, txin.txout_id, tx.lock_time, merkleblock.timestamp, txin.script_length, txin.signature_script from tx
+         LEFT JOIN txout on tx.id = txout.tx_id
+         LEFT JOIN txin on tx.id = txin.tx_id
+         LEFT JOIN merkleblock ON tx.lock_time = merkleblock.height
+         WHERE txout_id IS NULL
          """
                 )
                 
@@ -159,9 +453,9 @@ public class SQLiteBlockStore: BlockStore {
                 
                 statements["addMerkleBlock"] = """
                 REPLACE INTO merkleblock
-                (id, version, prev_block, merkle_root, timestamp, bits, nonce, total_transactions, hash_count, hashes, flag_count, flags)
+                (id, version, prev_block, merkle_root, timestamp, bits, nonce, total_transactions, hash_count, hashes, flag_count, flags, height)
                 VALUES
-                (?,  ?,       ?,          ?,           ?,         ?,    ?,     ?,                  ?,          ?,      ?,          ?);
+                (?,  ?,       ?,          ?,           ?,         ?,    ?,     ?,                  ?,          ?,      ?,          ?,     ?);
                 """
                 
                 statements["addTransaction"] = """
@@ -173,16 +467,16 @@ public class SQLiteBlockStore: BlockStore {
                 
                 statements["addTransactionInput"] = """
                 INSERT INTO txin
-                (script_length, signature_script, sequence, tx_id, txout_id)
+                (script_length, signature_script, sequence, tx_id, txout_id, address_id)
                 VALUES
-                (?,             ?,                ?,        ?,     ?);
+                (?,             ?,                ?,        ?,     ?,        ?);
                 """
                 
                 statements["addTransactionOutput"] = """
                 INSERT INTO txout
                 (out_index, value, pk_script_length, pk_script, tx_id, address_id)
                 VALUES
-                (?, ?,     ?,                ?,         ?,     ?);
+                (?,         ?,     ?,                ?,         ?,     ?);
                 """
                 
                 statements["deleteTransactionInput"] = """
@@ -194,19 +488,23 @@ public class SQLiteBlockStore: BlockStore {
                 """
                 
                 statements["calculateBalance"] = """
-                SELECT value FROM view_utxo WHERE address_id == ?;
+                SELECT value FROM view_tx WHERE in_address == ? OR out_address == ?;
                 """
                 
                 statements["transactions"] = """
-                SELECT * FROM view_tx WHERE address_id == ?;
+                SELECT * FROM view_tx WHERE in_address == ? OR out_address == ?;
                 """
                 
                 statements["latestBlockHash"] = """
                 SELECT id FROM merkleblock ORDER BY timestamp DESC LIMIT 1;
                 """
                 
+                statements["latestBlockHeight"] = """
+                SELECT height FROM merkleblock ORDER BY timestamp DESC LIMIT 1;
+                """
+                
                 statements["unspentTransactions"] = """
-                SELECT * FROM view_utxo WHERE address_id == ?;
+                SELECT * FROM view_utxo WHERE in_address == ? OR out_address == ?;
                 """
             }
             
@@ -216,7 +514,6 @@ public class SQLiteBlockStore: BlockStore {
     }
     
     public func addBlock(_ block: BlockMessage, hash: Data) throws {
-        print("-- \(#function) --")
         guard let sql = statements["addBlock"] else {
             print("sql query for \(#function) not found")
             return
@@ -237,31 +534,48 @@ public class SQLiteBlockStore: BlockStore {
         }
     }
     
-    public func addMerkleBlock(_ merkleBlock: MerkleBlockMessage, hash: Data) throws {
-        guard let sql = statements["addMerkleBlock"] else {
-            print("sql query for \(#function) not found")
-            return
-        }
+    public func addMerkleBlock(_ merkleBlock: MerkleBlockMessage, hash: Data, height: Int32) throws {
+//        guard let sql = statements["addMerkleBlock"] else {
+//            print("sql query for \(#function) not found")
+//            return
+//        }
         
         let hashes = Data(merkleBlock.hashes.flatMap { $0 })
         let flags = Data(merkleBlock.flags)
         
         try dbPool?.write { db in
-            let stmt = try db.cachedUpdateStatement(sql)
-            try stmt.execute(arguments: [
-                hash,
-                Int64(merkleBlock.version),
-                merkleBlock.prevBlock,
-                merkleBlock.merkleRoot,
-                Int64(merkleBlock.timestamp),
-                Int64(merkleBlock.bits),
-                Int64(merkleBlock.nonce),
-                Int64(merkleBlock.totalTransactions),
-                Int64(merkleBlock.numberOfHashes.underlyingValue),
-                hashes,
-                Int64(merkleBlock.numberOfFlags.underlyingValue),
-                flags
-                ])
+//            let stmt = try db.cachedUpdateStatement(sql)
+            
+            let block = Merkleblock(id: hash,
+                        version: Int64(merkleBlock.version),
+                        prev_block: merkleBlock.prevBlock,
+                        merkle_root: merkleBlock.merkleRoot,
+                        timestamp: Int64(merkleBlock.timestamp),
+                        bits: Int64(merkleBlock.bits),
+                        nonce: Int64(merkleBlock.nonce),
+                        total_transactions: Int64(merkleBlock.totalTransactions),
+                        hash_count: Int64(merkleBlock.numberOfHashes.underlyingValue),
+                        hashes: hashes,
+                        flag_count: Int64(merkleBlock.numberOfFlags.underlyingValue),
+                        flags: flags,
+                        height: Int64(height))
+            try block.insert(db)
+            
+//            try stmt.execute(arguments: [
+//                hash,
+//                Int64(merkleBlock.version),
+//                merkleBlock.prevBlock,
+//                merkleBlock.merkleRoot,
+//                Int64(merkleBlock.timestamp),
+//                Int64(merkleBlock.bits),
+//                Int64(merkleBlock.nonce),
+//                Int64(merkleBlock.totalTransactions),
+//                Int64(merkleBlock.numberOfHashes.underlyingValue),
+//                hashes,
+//                Int64(merkleBlock.numberOfFlags.underlyingValue),
+//                flags,
+//                Int64(height)
+//                ])
         }
     }
     
@@ -300,7 +614,7 @@ public class SQLiteBlockStore: BlockStore {
         
         return try dbPool?.read { db -> Int64 in
             let stmt = try db.cachedSelectStatement(sql)
-            stmt.arguments = [address.base58]
+            stmt.arguments = [address.base58, address.base58]
             
             var balance: Int64 = 0
             for row in try Row.fetchAll(stmt) {
@@ -329,20 +643,44 @@ public class SQLiteBlockStore: BlockStore {
         }
     }
     
+    public func latestBlockHeight() throws -> Int32? {
+        guard let sql = statements["latestBlockHeight"] else {
+            print("sql query for \(#function) not found")
+            return nil
+        }
+        
+        return try dbPool?.read { db -> Int32?  in
+            let stmt = try db.cachedSelectStatement(sql)
+            
+            if let row = try Row.fetchOne(stmt) {
+                if let value = Int64.fromDatabaseValue(row[0]){
+                    return Int32(value)
+                }
+            }
+            return nil
+        }
+    }
+    
     public func addTransactionInput(_ input: TransactionInput, txId: Data) throws {
         guard let sql = statements["addTransactionInput"] else {
             print("sql query for \(#function) not found")
             return
         }
         
+        var address = ""
+        if let addressConverter = self.addressConverter {
+            address = addressConverter.extract(from: input.signatureScript)?.base58 ?? ""
+        }
+        
         try dbPool?.write { db in
             let stmt = try db.cachedUpdateStatement(sql)
             try stmt.execute(arguments: [
                 Int64(input.scriptLength.underlyingValue),
-                Int64(input.signatureScript.count),
+                input.signatureScript,
                 Int64(input.sequence),
                 txId,
-                input.previousOutput.hash
+                input.previousOutput.hash,
+                address
                 ])
         }
     }
@@ -404,16 +742,25 @@ public class SQLiteBlockStore: BlockStore {
         
         return try dbPool?.read { db -> [Payment] in
             let stmt = try db.cachedSelectStatement(sql)
-            stmt.arguments = [address.base58]
+            stmt.arguments = [address.base58, address.base58]
             
             var payments = [Payment]()
             
             for row in try Row.fetchAll(stmt) {
                 if let txid = Data.fromDatabaseValue(row[0]),
-                    let address = String.fromDatabaseValue(row[1]),
-                    let index = Int64.fromDatabaseValue(row[2]),
-                    let value = Int64.fromDatabaseValue(row[3]) {
-                    payments.append(Payment(state: .received, index: index, amount: value, from: try! AddressFactory.create(address), to: try! AddressFactory.create(address), txid: txid))
+                    let inAddress = String.fromDatabaseValue(row[1]),
+                    let outAddress = String.fromDatabaseValue(row[2]),
+                    let index = Int64.fromDatabaseValue(row[3]),
+                    let value = Int64.fromDatabaseValue(row[4]),
+                    let lockTime = Int64.fromDatabaseValue(row[6]),
+                    let signatureScript = Data.fromDatabaseValue(row[9]) {
+                    let timestamp = Int64.fromDatabaseValue(row[7])
+                    
+                    let from = try! AddressFactory.create(inAddress)
+                    let to = try! AddressFactory.create(outAddress)
+                    let state: Payment.State = (outAddress == address.base58) ? .received : .sent
+                    
+                    payments.append(Payment(state: state, index: index, amount: value, from: from, to: to, txid: txid, lockTime: lockTime, timestamp: timestamp, signatureScript: signatureScript))
                 }
             }
             
@@ -429,16 +776,25 @@ public class SQLiteBlockStore: BlockStore {
         
         return try dbPool?.read { db -> [Payment] in
             let stmt = try db.cachedSelectStatement(sql)
-            stmt.arguments = [address.base58]
+            stmt.arguments = [address.base58, address.base58]
             
             var payments = [Payment]()
             
             for row in try Row.fetchAll(stmt) {
                 if let txid = Data.fromDatabaseValue(row[0]),
-                    let address = String.fromDatabaseValue(row[1]),
-                    let index = Int64.fromDatabaseValue(row[2]),
-                    let value = Int64.fromDatabaseValue(row[3]) {
-                    payments.append(Payment(state: .received, index: index, amount: value, from: try! AddressFactory.create(address), to: try! AddressFactory.create(address), txid: txid))
+                    let inAddress = String.fromDatabaseValue(row[1]),
+                    let outAddress = String.fromDatabaseValue(row[2]),
+                    let index = Int64.fromDatabaseValue(row[3]),
+                    let value = Int64.fromDatabaseValue(row[4]),
+                    let lockTime = Int64.fromDatabaseValue(row[6]),
+                    let signatureScript = Data.fromDatabaseValue(row[9]) {
+                    let timestamp = Int64.fromDatabaseValue(row[7])
+                    
+                    let from = try! AddressFactory.create(inAddress)
+                    let to = try! AddressFactory.create(outAddress)
+                    let state: Payment.State = (outAddress == address.base58) ? .received : .sent
+                    
+                    payments.append(Payment(state: state, index: index, amount: value, from: from, to: to, txid: txid, lockTime: lockTime, timestamp: timestamp, signatureScript: signatureScript))
                 }
             }
             

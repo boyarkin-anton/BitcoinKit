@@ -38,8 +38,8 @@ public class BlockChain {
         try blockStore.addBlock(block, hash: hash)
     }
 
-    public func addMerkleBlock(_ merkleBlock: MerkleBlockMessage, hash: Data) throws {
-        try blockStore.addMerkleBlock(merkleBlock, hash: hash)
+    public func addMerkleBlock(_ merkleBlock: MerkleBlockMessage, hash: Data, height: Int32) throws {
+        try blockStore.addMerkleBlock(merkleBlock, hash: hash, height: height)
     }
 
     public func addTransaction(_ transaction: Transaction, hash: Data) throws {
@@ -56,5 +56,13 @@ public class BlockChain {
             latestBlockHash = try blockStore.latestBlockHash()
         } catch {}
         return latestBlockHash ?? network.checkpoints.last!.hash
+    }
+    
+    public func latestBlockHeight() -> Int32 {
+        var latestBlockHeight: Int32?
+        do {
+            latestBlockHeight = try blockStore.latestBlockHeight()
+        } catch {}
+        return latestBlockHeight ?? network.checkpoints.last!.height
     }
 }
