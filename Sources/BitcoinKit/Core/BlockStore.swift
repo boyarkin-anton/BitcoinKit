@@ -346,6 +346,7 @@ public protocol BlockStore {
     func calculateBalance(address: Address) throws -> Int64
     func latestBlockHash() throws -> Data?
     func latestBlockHeight() throws -> Int32?
+    func transaction(with hash: Data) throws -> Payment?
 }
 
 public class SQLiteBlockStore: BlockStore {
@@ -508,6 +509,10 @@ public class SQLiteBlockStore: BlockStore {
                 
                 statements["unspentTransactions"] = """
                 SELECT * FROM view_utxo WHERE in_address == ? OR out_address == ?;
+                """
+                
+                statements["transaction"] = """
+                SELECT * FROM view_tx WHERE id == ?;
                 """
             }
             
@@ -817,5 +822,44 @@ public class SQLiteBlockStore: BlockStore {
             
             return payments
         } ?? [Payment]()
+    }
+    
+    public func transaction(with hash: Data) throws -> Payment? {
+        guard let sql = statements["transaction"] else {
+            print("sql query for \(#function) not found")
+            return nil
+        }
+        
+        let lastHeight = try latestBlockHeight() ?? 0
+        
+        return try dbPool?.read { db -> Payment? in
+            let stmt = try db.cachedSelectStatement(sql)
+            stmt.arguments = [hash]
+            
+            if let row = try Row.fetchOne(stmt) {
+                if let txid = Data.fromDatabaseValue(row[0]),
+                    let inAddress = String.fromDatabaseValue(row[1]),
+                    let outAddress = String.fromDatabaseValue(row[2]),
+                    let index = Int64.fromDatabaseValue(row[3]),
+                    let value = Int64.fromDatabaseValue(row[4]),
+                    let lockTime = Int64.fromDatabaseValue(row[6]),
+                    let signatureScript = Data.fromDatabaseValue(row[9]) {
+                    let timestamp = Int64.fromDatabaseValue(row[7])
+                    
+                    let from = try! AddressFactory.create(inAddress)
+                    let to = try! AddressFactory.create(outAddress)
+                    let state: Payment.State = .unknown
+                    
+                    var confirmations: Int64 = 0
+                    if case 1..<500000000 = lockTime, lastHeight > lockTime {
+                        confirmations = Int64(lastHeight) - lockTime
+                    }
+                    
+                    return Payment(state: state, index: index, amount: value, from: from, to: to, txid: txid, lockTime: lockTime, timestamp: timestamp, signatureScript: signatureScript, confirmations: confirmations)
+                }
+            }
+            
+            return nil
+        }
     }
 }

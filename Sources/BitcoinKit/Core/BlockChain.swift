@@ -49,6 +49,10 @@ public class BlockChain {
     public func calculateBalance(address: Address) throws -> Int64 {
         return try blockStore.calculateBalance(address: address)
     }
+    
+    public func transaction(with hash: Data) throws -> Payment? {
+        return try blockStore.transaction(with: hash)
+    }
 
     public func latestBlockHash() -> Data {
         var latestBlockHash: Data?
