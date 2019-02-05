@@ -164,6 +164,7 @@ public struct Payment {
     public enum State {
         case sent
         case received
+        case unknown
     }
 
     public let state: State
@@ -174,10 +175,11 @@ public struct Payment {
     public let txid: Data
     public let lockTime: Int64
     public let timestamp: Int64?
+    public let confirmations: Int64
     
     public let signatureScript: Data
     
-    public init(state: State, index: Int64, amount: Int64, from: Address, to: Address, txid: Data, lockTime: Int64, timestamp: Int64?, signatureScript: Data) {
+    public init(state: State, index: Int64, amount: Int64, from: Address, to: Address, txid: Data, lockTime: Int64, timestamp: Int64?, signatureScript: Data, confirmations: Int64) {
         self.state = state
         self.index = index
         self.amount = amount
@@ -187,6 +189,7 @@ public struct Payment {
         self.lockTime = lockTime
         self.timestamp = timestamp
         self.signatureScript = signatureScript
+        self.confirmations = confirmations
     }
 }
 
@@ -740,39 +743,7 @@ public class SQLiteBlockStore: BlockStore {
             return [Payment]()
         }
         
-        return try dbPool?.read { db -> [Payment] in
-            let stmt = try db.cachedSelectStatement(sql)
-            stmt.arguments = [address.base58, address.base58]
-            
-            var payments = [Payment]()
-            
-            for row in try Row.fetchAll(stmt) {
-                if let txid = Data.fromDatabaseValue(row[0]),
-                    let inAddress = String.fromDatabaseValue(row[1]),
-                    let outAddress = String.fromDatabaseValue(row[2]),
-                    let index = Int64.fromDatabaseValue(row[3]),
-                    let value = Int64.fromDatabaseValue(row[4]),
-                    let lockTime = Int64.fromDatabaseValue(row[6]),
-                    let signatureScript = Data.fromDatabaseValue(row[9]) {
-                    let timestamp = Int64.fromDatabaseValue(row[7])
-                    
-                    let from = try! AddressFactory.create(inAddress)
-                    let to = try! AddressFactory.create(outAddress)
-                    let state: Payment.State = (outAddress == address.base58) ? .received : .sent
-                    
-                    payments.append(Payment(state: state, index: index, amount: value, from: from, to: to, txid: txid, lockTime: lockTime, timestamp: timestamp, signatureScript: signatureScript))
-                }
-            }
-            
-            return payments
-        } ?? [Payment]()
-    }
-    
-    public func unspentTransactions(address: Address) throws -> [Payment] {
-        guard let sql = statements["unspentTransactions"] else {
-            print("sql query for \(#function) not found")
-            return [Payment]()
-        }
+        let lastHeight = try latestBlockHeight() ?? 0
         
         return try dbPool?.read { db -> [Payment] in
             let stmt = try db.cachedSelectStatement(sql)
@@ -794,7 +765,53 @@ public class SQLiteBlockStore: BlockStore {
                     let to = try! AddressFactory.create(outAddress)
                     let state: Payment.State = (outAddress == address.base58) ? .received : .sent
                     
-                    payments.append(Payment(state: state, index: index, amount: value, from: from, to: to, txid: txid, lockTime: lockTime, timestamp: timestamp, signatureScript: signatureScript))
+                    var confirmations: Int64 = 0
+                    if case 1..<500000000 = lockTime, lastHeight > lockTime {
+                        confirmations = Int64(lastHeight) - lockTime
+                    }
+                    
+                    payments.append(Payment(state: state, index: index, amount: value, from: from, to: to, txid: txid, lockTime: lockTime, timestamp: timestamp, signatureScript: signatureScript, confirmations: confirmations))
+                }
+            }
+            
+            return payments
+        } ?? [Payment]()
+    }
+    
+    public func unspentTransactions(address: Address) throws -> [Payment] {
+        guard let sql = statements["unspentTransactions"] else {
+            print("sql query for \(#function) not found")
+            return [Payment]()
+        }
+        
+        let lastHeight = try latestBlockHeight() ?? 0
+        
+        return try dbPool?.read { db -> [Payment] in
+            let stmt = try db.cachedSelectStatement(sql)
+            stmt.arguments = [address.base58, address.base58]
+            
+            var payments = [Payment]()
+            
+            for row in try Row.fetchAll(stmt) {
+                if let txid = Data.fromDatabaseValue(row[0]),
+                    let inAddress = String.fromDatabaseValue(row[1]),
+                    let outAddress = String.fromDatabaseValue(row[2]),
+                    let index = Int64.fromDatabaseValue(row[3]),
+                    let value = Int64.fromDatabaseValue(row[4]),
+                    let lockTime = Int64.fromDatabaseValue(row[6]),
+                    let signatureScript = Data.fromDatabaseValue(row[9]) {
+                    let timestamp = Int64.fromDatabaseValue(row[7])
+                    
+                    let from = try! AddressFactory.create(inAddress)
+                    let to = try! AddressFactory.create(outAddress)
+                    let state: Payment.State = (outAddress == address.base58) ? .received : .sent
+                    
+                    var confirmations: Int64 = 0
+                    if case 1..<500000000 = lockTime, lastHeight > lockTime {
+                        confirmations = Int64(lastHeight) - lockTime
+                    }
+                    
+                    payments.append(Payment(state: state, index: index, amount: value, from: from, to: to, txid: txid, lockTime: lockTime, timestamp: timestamp, signatureScript: signatureScript, confirmations: confirmations))
                 }
             }
             
