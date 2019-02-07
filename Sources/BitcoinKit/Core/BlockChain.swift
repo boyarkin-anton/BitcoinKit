@@ -50,7 +50,7 @@ public class BlockChain {
         return try blockStore.calculateBalance(address: address)
     }
     
-    public func transaction(with hash: Data) throws -> Payment? {
+    public func transaction(with hash: String) throws -> Payment? {
         return try blockStore.transaction(with: hash)
     }
 

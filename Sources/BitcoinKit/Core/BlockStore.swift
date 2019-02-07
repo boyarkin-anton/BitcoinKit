@@ -168,28 +168,25 @@ public struct Payment {
     }
 
     public let state: State
-    public let index: Int64
     public let amount: Int64
     public let from: Address
     public let to: Address
-    public let txid: Data
+    public let txid: String
     public let lockTime: Int64
     public let timestamp: Int64?
     public let confirmations: Int64
+    public let fee: Int64?
     
-    public let signatureScript: Data
-    
-    public init(state: State, index: Int64, amount: Int64, from: Address, to: Address, txid: Data, lockTime: Int64, timestamp: Int64?, signatureScript: Data, confirmations: Int64) {
+    public init(state: State, amount: Int64, from: Address, to: Address, txid: String, lockTime: Int64, timestamp: Int64?, confirmations: Int64, fee: Int64?) {
         self.state = state
-        self.index = index
         self.amount = amount
         self.from = from
         self.to = to
         self.txid = txid
         self.lockTime = lockTime
         self.timestamp = timestamp
-        self.signatureScript = signatureScript
         self.confirmations = confirmations
+        self.fee = fee
     }
 }
 
@@ -346,7 +343,7 @@ public protocol BlockStore {
     func calculateBalance(address: Address) throws -> Int64
     func latestBlockHash() throws -> Data?
     func latestBlockHeight() throws -> Int32?
-    func transaction(with hash: Data) throws -> Payment?
+    func transaction(with hash: String) throws -> Payment?
 }
 
 public class SQLiteBlockStore: BlockStore {
@@ -402,7 +399,7 @@ public class SQLiteBlockStore: BlockStore {
                 }
                 
                 try db.create(table: "tx", ifNotExists: true) { t in
-                    t.column("id", .blob).notNull()
+                    t.column("id", .text).notNull()
                     t.column("version", .integer).notNull()
                     t.column("flag", .integer).notNull()
                     t.column("tx_in_count", .integer).notNull()
@@ -415,8 +412,9 @@ public class SQLiteBlockStore: BlockStore {
                     t.column("script_length", .integer).notNull()
                     t.column("signature_script", .blob).notNull()
                     t.column("sequence", .integer).notNull()
-                    t.column("tx_id", .blob).notNull()
-                    t.column("txout_id", .blob).notNull()
+                    t.column("tx_id", .text).notNull()
+                    t.column("txout_index", .integer).notNull()
+                    t.column("txout_id", .text).notNull()
                     t.column("address_id", .text)
                     t.foreignKey(["tx_id"], references: "tx", columns: ["id"])
                 }
@@ -426,26 +424,62 @@ public class SQLiteBlockStore: BlockStore {
                     t.column("value", .integer).notNull()
                     t.column("pk_script_length", .integer).notNull()
                     t.column("pk_script", .blob).notNull()
-                    t.column("tx_id", .blob).notNull()
+                    t.column("tx_id", .text).notNull()
                     t.column("address_id", .text)
                     t.foreignKey(["tx_id"], references: "tx", columns: ["id"])
                 }
                 
                 try db.execute(
-                    """
-         CREATE VIEW IF NOT EXISTS view_tx AS
-         SELECT tx.id, txin.address_id AS in_address, txout.address_id AS out_address, txout.out_index, txout.value, txin.txout_id, tx.lock_time, merkleblock.timestamp, txin.script_length, txin.signature_script from tx
-         LEFT JOIN txout on tx.id = txout.tx_id
-         LEFT JOIN txin on tx.id = txin.tx_id
-         LEFT JOIN merkleblock ON tx.lock_time = merkleblock.height;
+"""
+CREATE VIEW IF NOT EXISTS view_tx AS
+    SELECT tx.id,
+           txin.address_id AS in_address,
+           txout.address_id AS out_address,
+           txout.value,
+           tx.lock_time,
+           merkleblock.timestamp
+      FROM tx
+           LEFT JOIN
+           txout ON tx.id = txout.tx_id
+           LEFT JOIN
+           txin ON tx.id = txin.tx_id
+           LEFT JOIN
+           merkleblock ON tx.lock_time = merkleblock.height;
 
-         CREATE VIEW IF NOT EXISTS view_utxo AS
-         SELECT tx.id, txin.address_id AS in_address, txout.address_id AS out_address, txout.out_index, txout.value, txin.txout_id, tx.lock_time, merkleblock.timestamp, txin.script_length, txin.signature_script from tx
-         LEFT JOIN txout on tx.id = txout.tx_id
-         LEFT JOIN txin on tx.id = txin.tx_id
-         LEFT JOIN merkleblock ON tx.lock_time = merkleblock.height
-         WHERE txout_id IS NULL
-         """
+CREATE VIEW IF NOT EXISTS view_utxo AS
+    SELECT tx.id,
+           txin.address_id AS in_address,
+           txout.address_id AS out_address,
+           txout.out_index,
+           txout.value,
+           txin.txout_id,
+           tx.lock_time,
+           merkleblock.timestamp,
+           txin.script_length,
+           txin.signature_script
+      FROM tx
+           LEFT JOIN
+           txout ON tx.id = txout.tx_id
+           LEFT JOIN
+           txin ON tx.id = txin.tx_id
+           LEFT JOIN
+           merkleblock ON tx.lock_time = merkleblock.height
+     WHERE txout_id IS NULL;
+
+CREATE VIEW IF NOT EXISTS view_tx_fees AS
+    SELECT tx.id,
+           prev.value - sum(txout.value) AS fee,
+           txin.address_id AS in_address
+      FROM tx
+           LEFT JOIN
+           txout ON tx.id = txout.tx_id
+           LEFT JOIN
+           txin ON tx.id = txin.tx_id
+           LEFT JOIN
+           txout AS prev ON prev.tx_id = txin.txout_id AND
+                            prev.out_index = txin.txout_index
+     GROUP BY tx.id;
+"""
                 )
                 
                 statements["addBlock"] = """
@@ -471,9 +505,9 @@ public class SQLiteBlockStore: BlockStore {
                 
                 statements["addTransactionInput"] = """
                 INSERT INTO txin
-                (script_length, signature_script, sequence, tx_id, txout_id, address_id)
+                (script_length, signature_script, sequence, tx_id, txout_index, txout_id, address_id)
                 VALUES
-                (?,             ?,                ?,        ?,     ?,        ?);
+                (?,             ?,                ?,        ?,     ?,           ?,        ?);
                 """
                 
                 statements["addTransactionOutput"] = """
@@ -495,8 +529,20 @@ public class SQLiteBlockStore: BlockStore {
                 SELECT value FROM view_tx WHERE in_address == ? OR out_address == ?;
                 """
                 
+                statements["getIncome"] = """
+                SELECT SUM(value) FROM view_tx WHERE in_address != out_address AND out_address == ?;
+                """
+                
+                statements["getExpenses"] = """
+                SELECT SUM(value) FROM view_tx WHERE in_address != out_address AND in_address == ?;
+                """
+                
+                statements["getFees"] = """
+                SELECT SUM(fee) FROM view_tx_fees WHERE in_address == ?;
+                """
+                
                 statements["transactions"] = """
-                SELECT * FROM view_tx WHERE in_address == ? OR out_address == ?;
+                SELECT * FROM view_tx WHERE in_address != out_address AND (in_address == ? OR out_address == ?);
                 """
                 
                 statements["latestBlockHash"] = """
@@ -508,11 +554,15 @@ public class SQLiteBlockStore: BlockStore {
                 """
                 
                 statements["unspentTransactions"] = """
-                SELECT * FROM view_utxo WHERE in_address == ? OR out_address == ?;
+                SELECT * FROM view_utxo WHERE in_address != out_address AND (in_address == ? OR out_address == ?)
                 """
                 
                 statements["transaction"] = """
                 SELECT * FROM view_tx WHERE id == ?;
+                """
+                
+                statements["transaction_fee"] = """
+                SELECT * FROM view_tx_fees WHERE id == ?;
                 """
             }
             
@@ -596,7 +646,7 @@ public class SQLiteBlockStore: BlockStore {
         try dbPool?.write { db in
             let stmt = try db.cachedUpdateStatement(sql)
             try stmt.execute(arguments: [
-                hash,
+                hash.hex,
                 Int64(transaction.version),
                 0, // Not supported 'flag' currently
                 Int64(transaction.txInCount.underlyingValue),
@@ -615,21 +665,68 @@ public class SQLiteBlockStore: BlockStore {
     }
     
     public func calculateBalance(address: Address) throws -> Int64 {
-        guard let sql = statements["calculateBalance"] else {
+        let income = try getIncome(address: address)
+        let expenses = try getExpenses(address: address)
+        let fees = try getFees(address: address)
+        return income - expenses - fees
+//        guard let sql = statements["calculateBalance"] else {
+//            print("sql query for \(#function) not found")
+//            return 0
+//        }
+//
+//        return try dbPool?.read { db -> Int64 in
+//            let stmt = try db.cachedSelectStatement(sql)
+//            stmt.arguments = [address.base58, address.base58]
+//
+//            var balance: Int64 = 0
+//            for row in try Row.fetchAll(stmt) {
+//                let value = Int64.fromDatabaseValue(row[0])
+//                balance += value ?? 0
+//            }
+//            return balance
+//            } ?? 0
+    }
+    
+    private func getIncome(address: Address) throws -> Int64 {
+        guard let sql = statements["getIncome"] else {
             print("sql query for \(#function) not found")
             return 0
         }
         
         return try dbPool?.read { db -> Int64 in
             let stmt = try db.cachedSelectStatement(sql)
-            stmt.arguments = [address.base58, address.base58]
+            stmt.arguments = [address.base58]
             
-            var balance: Int64 = 0
-            for row in try Row.fetchAll(stmt) {
-                let value = Int64.fromDatabaseValue(row[0])
-                balance += value ?? 0
-            }
-            return balance
+            
+            return try Int64.fetchOne(stmt) ?? 0
+            } ?? 0
+    }
+    
+    private func getExpenses(address: Address) throws -> Int64 {
+        guard let sql = statements["getExpenses"] else {
+            print("sql query for \(#function) not found")
+            return 0
+        }
+        
+        return try dbPool?.read { db -> Int64 in
+            let stmt = try db.cachedSelectStatement(sql)
+            stmt.arguments = [address.base58]
+            
+            return try Int64.fetchOne(stmt) ?? 0
+            } ?? 0
+    }
+    
+    private func getFees(address: Address) throws -> Int64 {
+        guard let sql = statements["getFees"] else {
+            print("sql query for \(#function) not found")
+            return 0
+        }
+        
+        return try dbPool?.read { db -> Int64 in
+            let stmt = try db.cachedSelectStatement(sql)
+            stmt.arguments = [address.base58]
+            
+            return try Int64.fetchOne(stmt) ?? 0
             } ?? 0
     }
     
@@ -686,8 +783,9 @@ public class SQLiteBlockStore: BlockStore {
                 Int64(input.scriptLength.underlyingValue),
                 input.signatureScript,
                 Int64(input.sequence),
-                txId,
-                input.previousOutput.hash,
+                txId.hex,
+                Int64(input.previousOutput.index),
+                Data(input.previousOutput.hash.reversed()).hex,
                 address
                 ])
         }
@@ -712,7 +810,7 @@ public class SQLiteBlockStore: BlockStore {
                 Int64(output.value),
                 Int64(output.scriptLength.underlyingValue),
                 output.lockingScript,
-                txId,
+                txId.hex,
                 address
                 ])
         }
@@ -757,14 +855,12 @@ public class SQLiteBlockStore: BlockStore {
             var payments = [Payment]()
             
             for row in try Row.fetchAll(stmt) {
-                if let txid = Data.fromDatabaseValue(row[0]),
+                if let txid = String.fromDatabaseValue(row[0]),
                     let inAddress = String.fromDatabaseValue(row[1]),
                     let outAddress = String.fromDatabaseValue(row[2]),
-                    let index = Int64.fromDatabaseValue(row[3]),
-                    let value = Int64.fromDatabaseValue(row[4]),
-                    let lockTime = Int64.fromDatabaseValue(row[6]),
-                    let signatureScript = Data.fromDatabaseValue(row[9]) {
-                    let timestamp = Int64.fromDatabaseValue(row[7])
+                    let value = Int64.fromDatabaseValue(row[3]),
+                    let lockTime = Int64.fromDatabaseValue(row[4]) {
+                    let timestamp = Int64.fromDatabaseValue(row[5])
                     
                     let from = try! AddressFactory.create(inAddress)
                     let to = try! AddressFactory.create(outAddress)
@@ -775,7 +871,9 @@ public class SQLiteBlockStore: BlockStore {
                         confirmations = Int64(lastHeight) - lockTime
                     }
                     
-                    payments.append(Payment(state: state, index: index, amount: value, from: from, to: to, txid: txid, lockTime: lockTime, timestamp: timestamp, signatureScript: signatureScript, confirmations: confirmations))
+                    let fee = try self.getTransactionFee(for: txid, in: db)
+                    
+                    payments.append(Payment(state: state, amount: value, from: from, to: to, txid: txid, lockTime: lockTime, timestamp: timestamp, confirmations: confirmations, fee: fee))
                 }
             }
             
@@ -798,14 +896,12 @@ public class SQLiteBlockStore: BlockStore {
             var payments = [Payment]()
             
             for row in try Row.fetchAll(stmt) {
-                if let txid = Data.fromDatabaseValue(row[0]),
+                if let txid = String.fromDatabaseValue(row[0]),
                     let inAddress = String.fromDatabaseValue(row[1]),
                     let outAddress = String.fromDatabaseValue(row[2]),
-                    let index = Int64.fromDatabaseValue(row[3]),
-                    let value = Int64.fromDatabaseValue(row[4]),
-                    let lockTime = Int64.fromDatabaseValue(row[6]),
-                    let signatureScript = Data.fromDatabaseValue(row[9]) {
-                    let timestamp = Int64.fromDatabaseValue(row[7])
+                    let value = Int64.fromDatabaseValue(row[3]),
+                    let lockTime = Int64.fromDatabaseValue(row[4]) {
+                    let timestamp = Int64.fromDatabaseValue(row[5])
                     
                     let from = try! AddressFactory.create(inAddress)
                     let to = try! AddressFactory.create(outAddress)
@@ -816,7 +912,9 @@ public class SQLiteBlockStore: BlockStore {
                         confirmations = Int64(lastHeight) - lockTime
                     }
                     
-                    payments.append(Payment(state: state, index: index, amount: value, from: from, to: to, txid: txid, lockTime: lockTime, timestamp: timestamp, signatureScript: signatureScript, confirmations: confirmations))
+                    let fee = try self.getTransactionFee(for: txid, in: db)
+                    
+                    payments.append(Payment(state: state, amount: value, from: from, to: to, txid: txid, lockTime: lockTime, timestamp: timestamp, confirmations: confirmations, fee: fee))
                 }
             }
             
@@ -824,7 +922,7 @@ public class SQLiteBlockStore: BlockStore {
         } ?? [Payment]()
     }
     
-    public func transaction(with hash: Data) throws -> Payment? {
+    public func transaction(with hash: String) throws -> Payment? {
         guard let sql = statements["transaction"] else {
             print("sql query for \(#function) not found")
             return nil
@@ -837,14 +935,12 @@ public class SQLiteBlockStore: BlockStore {
             stmt.arguments = [hash]
             
             if let row = try Row.fetchOne(stmt) {
-                if let txid = Data.fromDatabaseValue(row[0]),
+                if let txid = String.fromDatabaseValue(row[0]),
                     let inAddress = String.fromDatabaseValue(row[1]),
                     let outAddress = String.fromDatabaseValue(row[2]),
-                    let index = Int64.fromDatabaseValue(row[3]),
-                    let value = Int64.fromDatabaseValue(row[4]),
-                    let lockTime = Int64.fromDatabaseValue(row[6]),
-                    let signatureScript = Data.fromDatabaseValue(row[9]) {
-                    let timestamp = Int64.fromDatabaseValue(row[7])
+                    let value = Int64.fromDatabaseValue(row[3]),
+                    let lockTime = Int64.fromDatabaseValue(row[4]) {
+                    let timestamp = Int64.fromDatabaseValue(row[5])
                     
                     let from = try! AddressFactory.create(inAddress)
                     let to = try! AddressFactory.create(outAddress)
@@ -855,11 +951,30 @@ public class SQLiteBlockStore: BlockStore {
                         confirmations = Int64(lastHeight) - lockTime
                     }
                     
-                    return Payment(state: state, index: index, amount: value, from: from, to: to, txid: txid, lockTime: lockTime, timestamp: timestamp, signatureScript: signatureScript, confirmations: confirmations)
+                    let fee = try self.getTransactionFee(for: hash, in: db)
+                    
+                    return Payment(state: state, amount: value, from: from, to: to, txid: txid, lockTime: lockTime, timestamp: timestamp, confirmations: confirmations, fee: fee)
                 }
             }
             
             return nil
         }
+    }
+    
+    private func getTransactionFee(for hash: String, in db: Database) throws -> Int64? {
+        guard let sql = statements["transaction_fee"] else {
+            print("sql query for \(#function) not found")
+            return nil
+        }
+        
+        let stmt = try db.cachedSelectStatement(sql)
+        stmt.arguments = [hash]
+        
+        if let row = try Row.fetchOne(stmt) {
+            if let value = Int64.fromDatabaseValue(row[1]){
+                return value
+            }
+        }
+        return nil
     }
 }
