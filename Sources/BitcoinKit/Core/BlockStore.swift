@@ -27,7 +27,7 @@
 
 import Foundation
 
-import GRDB
+import GRDBCipher
 
 public struct Payment {
     public enum State {
@@ -94,6 +94,10 @@ public class SQLiteBlockStore: BlockStore {
         self.openDB(name: name, passphrase: passphrase)
     }
     
+    func openDB(name: String? = nil, passphrase: String? = nil) {
+        var configuration = Configuration()
+        configuration.passphrase = passphrase
+        
         var dbName = ""
         if let name = name {
             dbName = "\(name).sqlite"
@@ -103,7 +107,7 @@ public class SQLiteBlockStore: BlockStore {
         
         let cachesDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         do {
-            dbPool = try DatabasePool(path: cachesDir.appendingPathComponent(dbName).path)
+            dbPool = try DatabasePool(path: cachesDir.appendingPathComponent(dbName).path, configuration: configuration)
             try dbPool?.write { db in
                 
                 try db.create(table: "block", ifNotExists: true) { t in
