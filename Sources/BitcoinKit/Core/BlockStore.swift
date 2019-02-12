@@ -169,6 +169,7 @@ public struct Payment {
 
     public let state: State
     public let amount: Int64
+    public let index: Int64
     public let from: Address
     public let to: Address
     public let txid: String
@@ -177,8 +178,9 @@ public struct Payment {
     public let confirmations: Int64
     public let fee: Int64?
     
-    public init(state: State, amount: Int64, from: Address, to: Address, txid: String, lockTime: Int64, timestamp: Int64?, confirmations: Int64, fee: Int64?) {
+    public init(state: State, index: Int64, amount: Int64, from: Address, to: Address, txid: String, lockTime: Int64, timestamp: Int64?, confirmations: Int64, fee: Int64?) {
         self.state = state
+        self.index = index
         self.amount = amount
         self.from = from
         self.to = to
@@ -357,16 +359,23 @@ public class SQLiteBlockStore: BlockStore {
     
     private var statements = [String: String]()
     
-    public init(network: Network) {
+    public init(network: Network, name: String? = nil) {
         self.network = network
         self.addressConverter = AddressConverter(network: network)
-        self.openDB()
+        self.openDB(with: name)
     }
     
-    func openDB() {
+    func openDB(with name: String?) {
+        var dbName = ""
+        if name != nil {
+            dbName = "\(name!)-\(self.network.scheme)-\(self.network.name)-blockchain.sqlite"
+        } else {
+            dbName = "\(self.network.scheme)-\(self.network.name)-blockchain.sqlite"
+        }
+        
         let cachesDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         do {
-            dbPool = try DatabasePool(path: cachesDir.appendingPathComponent("\(self.network.scheme)-\(self.network.name)-blockchain.sqlite").path)
+            dbPool = try DatabasePool(path: cachesDir.appendingPathComponent(dbName).path)
             try dbPool?.write { db in
                 
                 try db.create(table: "block", ifNotExists: true) { t in
@@ -435,6 +444,7 @@ CREATE VIEW IF NOT EXISTS view_tx AS
     SELECT tx.id,
            txin.address_id AS in_address,
            txout.address_id AS out_address,
+           txout.out_index,
            txout.value,
            tx.lock_time,
            merkleblock.timestamp
@@ -452,11 +462,9 @@ CREATE VIEW IF NOT EXISTS view_utxo AS
            txout.address_id AS out_address,
            txout.out_index,
            txout.value,
-           txin.txout_id,
            tx.lock_time,
            merkleblock.timestamp,
-           txin.script_length,
-           txin.signature_script
+           spent_tx.tx_id AS spent_id
       FROM tx
            LEFT JOIN
            txout ON tx.id = txout.tx_id
@@ -464,7 +472,10 @@ CREATE VIEW IF NOT EXISTS view_utxo AS
            txin ON tx.id = txin.tx_id
            LEFT JOIN
            merkleblock ON tx.lock_time = merkleblock.height
-     WHERE txout_id IS NULL;
+           LEFT JOIN
+           txin AS spent_tx ON spent_tx.txout_id = txout.tx_id AND
+                               spent_tx.txout_index = txout.out_index
+     WHERE spent_id IS NULL;
 
 CREATE VIEW IF NOT EXISTS view_tx_fees AS
     SELECT tx.id,
@@ -526,7 +537,7 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
                 """
                 
                 statements["calculateBalance"] = """
-                SELECT value FROM view_tx WHERE in_address == ? OR out_address == ?;
+                SELECT SUM(value) FROM view_utxo WHERE out_address == ?;
                 """
                 
                 statements["getIncome"] = """
@@ -554,7 +565,7 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
                 """
                 
                 statements["unspentTransactions"] = """
-                SELECT * FROM view_utxo WHERE in_address != out_address AND (in_address == ? OR out_address == ?)
+                SELECT * FROM view_utxo WHERE out_address == ?
                 """
                 
                 statements["transaction"] = """
@@ -665,15 +676,22 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
     }
     
     public func calculateBalance(address: Address) throws -> Int64 {
-        let income = try getIncome(address: address)
-        let expenses = try getExpenses(address: address)
-        let fees = try getFees(address: address)
-        return income - expenses - fees
-//        guard let sql = statements["calculateBalance"] else {
-//            print("sql query for \(#function) not found")
-//            return 0
-//        }
-//
+//        let income = try getIncome(address: address)
+//        let expenses = try getExpenses(address: address)
+//        let fees = try getFees(address: address)
+//        return income - expenses - fees
+        guard let sql = statements["calculateBalance"] else {
+            print("sql query for \(#function) not found")
+            return 0
+        }
+        
+        return try dbPool?.read { db -> Int64 in
+            let stmt = try db.cachedSelectStatement(sql)
+            stmt.arguments = [address.base58]
+            
+            return try Int64.fetchOne(stmt) ?? 0
+            } ?? 0
+
 //        return try dbPool?.read { db -> Int64 in
 //            let stmt = try db.cachedSelectStatement(sql)
 //            stmt.arguments = [address.base58, address.base58]
@@ -696,8 +714,7 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
         return try dbPool?.read { db -> Int64 in
             let stmt = try db.cachedSelectStatement(sql)
             stmt.arguments = [address.base58]
-            
-            
+                        
             return try Int64.fetchOne(stmt) ?? 0
             } ?? 0
     }
@@ -858,9 +875,10 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
                 if let txid = String.fromDatabaseValue(row[0]),
                     let inAddress = String.fromDatabaseValue(row[1]),
                     let outAddress = String.fromDatabaseValue(row[2]),
-                    let value = Int64.fromDatabaseValue(row[3]),
-                    let lockTime = Int64.fromDatabaseValue(row[4]) {
-                    let timestamp = Int64.fromDatabaseValue(row[5])
+                    let outIndex = Int64.fromDatabaseValue(row[3]),
+                    let value = Int64.fromDatabaseValue(row[4]),
+                    let lockTime = Int64.fromDatabaseValue(row[5]) {
+                    let timestamp = Int64.fromDatabaseValue(row[6])
                     
                     let from = try! AddressFactory.create(inAddress)
                     let to = try! AddressFactory.create(outAddress)
@@ -873,7 +891,7 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
                     
                     let fee = try self.getTransactionFee(for: txid, in: db)
                     
-                    payments.append(Payment(state: state, amount: value, from: from, to: to, txid: txid, lockTime: lockTime, timestamp: timestamp, confirmations: confirmations, fee: fee))
+                    payments.append(Payment(state: state, index: outIndex, amount: value, from: from, to: to, txid: txid, lockTime: lockTime, timestamp: timestamp, confirmations: confirmations, fee: fee))
                 }
             }
             
@@ -891,7 +909,7 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
         
         return try dbPool?.read { db -> [Payment] in
             let stmt = try db.cachedSelectStatement(sql)
-            stmt.arguments = [address.base58, address.base58]
+            stmt.arguments = [address.base58]
             
             var payments = [Payment]()
             
@@ -899,9 +917,10 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
                 if let txid = String.fromDatabaseValue(row[0]),
                     let inAddress = String.fromDatabaseValue(row[1]),
                     let outAddress = String.fromDatabaseValue(row[2]),
-                    let value = Int64.fromDatabaseValue(row[3]),
-                    let lockTime = Int64.fromDatabaseValue(row[4]) {
-                    let timestamp = Int64.fromDatabaseValue(row[5])
+                    let outIndex = Int64.fromDatabaseValue(row[3]),
+                    let value = Int64.fromDatabaseValue(row[4]),
+                    let lockTime = Int64.fromDatabaseValue(row[5]) {
+                    let timestamp = Int64.fromDatabaseValue(row[6])
                     
                     let from = try! AddressFactory.create(inAddress)
                     let to = try! AddressFactory.create(outAddress)
@@ -914,7 +933,7 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
                     
                     let fee = try self.getTransactionFee(for: txid, in: db)
                     
-                    payments.append(Payment(state: state, amount: value, from: from, to: to, txid: txid, lockTime: lockTime, timestamp: timestamp, confirmations: confirmations, fee: fee))
+                    payments.append(Payment(state: state, index: outIndex, amount: value, from: from, to: to, txid: txid, lockTime: lockTime, timestamp: timestamp, confirmations: confirmations, fee: fee))
                 }
             }
             
@@ -938,9 +957,10 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
                 if let txid = String.fromDatabaseValue(row[0]),
                     let inAddress = String.fromDatabaseValue(row[1]),
                     let outAddress = String.fromDatabaseValue(row[2]),
-                    let value = Int64.fromDatabaseValue(row[3]),
-                    let lockTime = Int64.fromDatabaseValue(row[4]) {
-                    let timestamp = Int64.fromDatabaseValue(row[5])
+                    let outIndex = Int64.fromDatabaseValue(row[3]),
+                    let value = Int64.fromDatabaseValue(row[4]),
+                    let lockTime = Int64.fromDatabaseValue(row[5]) {
+                    let timestamp = Int64.fromDatabaseValue(row[6])
                     
                     let from = try! AddressFactory.create(inAddress)
                     let to = try! AddressFactory.create(outAddress)
@@ -953,7 +973,7 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
                     
                     let fee = try self.getTransactionFee(for: hash, in: db)
                     
-                    return Payment(state: state, amount: value, from: from, to: to, txid: txid, lockTime: lockTime, timestamp: timestamp, confirmations: confirmations, fee: fee)
+                    return Payment(state: state, index: outIndex, amount: value, from: from, to: to, txid: txid, lockTime: lockTime, timestamp: timestamp, confirmations: confirmations, fee: fee)
                 }
             }
             
