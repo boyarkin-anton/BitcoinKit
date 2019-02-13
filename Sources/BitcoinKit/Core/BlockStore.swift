@@ -186,7 +186,8 @@ CREATE VIEW IF NOT EXISTS view_tx AS
            LEFT JOIN
            txin ON tx.id = txin.tx_id
            LEFT JOIN
-           merkleblock ON tx.lock_time = merkleblock.height;
+           merkleblock ON tx.lock_time = merkleblock.height
+     WHERE in_address != out_address;
 
 CREATE VIEW IF NOT EXISTS view_utxo AS
     SELECT tx.id,
@@ -207,18 +208,38 @@ CREATE VIEW IF NOT EXISTS view_utxo AS
      WHERE spent_id IS NULL;
 
 CREATE VIEW IF NOT EXISTS view_tx_fees AS
-    SELECT tx.id,
-           prev.value - sum(txout.value) AS fee,
-           txin.address_id AS in_address
-      FROM tx
+    SELECT input.id,
+           in_address,
+           in_value,
+           out_value,
+           in_value - out_value AS fee
+      FROM (
+               SELECT tx.id AS id,
+                      sum(txout.value) AS out_value,
+                      txout.address_id AS out_address
+                 FROM tx
+                      LEFT JOIN
+                      txout ON tx.id = txout.tx_id
+                WHERE out_address IS NOT ""
+                GROUP BY tx.id
+           )
+           AS output
            LEFT JOIN
-           txout ON tx.id = txout.tx_id
-           LEFT JOIN
-           txin ON tx.id = txin.tx_id
-           LEFT JOIN
-           txout AS prev ON prev.tx_id = txin.txout_id AND
-                            prev.out_index = txin.txout_index
-     GROUP BY tx.id;
+           (
+               SELECT tx.id AS id,
+                      SUM(prev.value) AS in_value,
+                      prev.address_id AS in_address
+                 FROM tx
+                      LEFT JOIN
+                      txin ON tx.id = txin.tx_id
+                      LEFT JOIN
+                      txout AS prev ON prev.tx_id = txin.txout_id AND
+                                       prev.out_index = txin.txout_index
+                WHERE in_address IS NOT NULL
+                GROUP BY tx.id
+           )
+           AS input ON input.id = output.id
+     WHERE fee IS NOT NULL;
 """
                 )
                 
@@ -282,7 +303,7 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
                 """
                 
                 statements["transactions"] = """
-                SELECT * FROM view_tx WHERE in_address != out_address AND (in_address == ? OR out_address == ?);
+                SELECT * FROM view_tx WHERE in_address != out_address AND (in_address == ? OR out_address == ?) GROUP BY id ORDER BY lock_time DESC;
                 """
                 
                 statements["latestBlockHash"] = """
