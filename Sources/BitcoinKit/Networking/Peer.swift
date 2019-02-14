@@ -54,6 +54,7 @@ public class Peer: NSObject, StreamDelegate {
         var pingTime = Date()
         var estimatedHeight: Int32 = 0
         var currentHeight: Int32 = 0
+        var startHeight: Int32 = 0
 
         var sentVersion = false
         var sentVerack = false
@@ -153,6 +154,7 @@ public class Peer: NSObject, StreamDelegate {
     public func startSync(filters: [Data] = [], latestBlockHash: Data, latestBlockHeight: Int32) {
         self.latestBlockHash = latestBlockHash
         self.context.currentHeight = latestBlockHeight
+        self.context.startHeight = latestBlockHeight
         context.isSyncing = true
 
         if !self.context.sentFilterLoad {
@@ -164,6 +166,12 @@ public class Peer: NSObject, StreamDelegate {
             }
         }
         self.sendGetBlocksMessage()
+        
+        if context.currentHeight < context.estimatedHeight {
+            delegate?.peer(self, didChangedState: PeerState.syncing(progress: 0))
+        } else {
+            delegate?.peer(self, didChangedState: .synced)
+        }
     }
 
     public func sendTransaction(transaction: Transaction) {
@@ -449,6 +457,13 @@ public class Peer: NSObject, StreamDelegate {
             context.inventoryItems[blockHash] = item
             context.blocks[blockHash] = context.currentHeight
         }
+        
+        if context.currentHeight < context.estimatedHeight {
+            let progress: Double =  Double(context.currentHeight - context.startHeight) / Double(context.estimatedHeight - context.startHeight)
+            delegate?.peer(self, didChangedState: .syncing(progress: progress))
+        } else {
+            delegate?.peer(self, didChangedState: .synced)
+        }
     }
 
     private func handleBlockMessage(payload: Data) {
@@ -519,6 +534,7 @@ public protocol PeerDelegate: class {
     func peer(_ peer: Peer, didReceiveMerkleBlockMessage message: MerkleBlockMessage, hash: Data, height: Int32)
     func peer(_ peer: Peer, didReceiveTransaction transaction: Transaction, hash: Data)
     func peer(_ peer: Peer, didReceiveRejectMessage message: RejectMessage)
+    func peer(_ peer: Peer, didChangedState state: PeerState)
 }
 
 extension PeerDelegate {
@@ -532,4 +548,5 @@ extension PeerDelegate {
     public func peer(_ peer: Peer, didReceiveMerkleBlockMessage message: MerkleBlockMessage, hash: Data, height: Int32) {}
     public func peer(_ peer: Peer, didReceiveTransaction transaction: Transaction, hash: Data) {}
     public func peer(_ peer: Peer, didReceiveRejectMessage message: RejectMessage) {}
+    public func peer(_ peer: Peer, didChangedState state: PeerState) {}
 }

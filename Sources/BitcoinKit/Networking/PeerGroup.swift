@@ -129,16 +129,28 @@ public class PeerGroup: PeerDelegate {
         try! blockChain.addTransaction(transaction, hash: hash)
         delegate?.peerGroupDidReceiveTransaction(self)
     }
+    
+    public func peer(_ peer: Peer, didChangedState state: PeerState) {
+        delegate?.peerGroupDidChanged(state)
+    }
 }
 
 public protocol PeerGroupDelegate: class {
     func peerGroupDidStart(_ peerGroup: PeerGroup)
     func peerGroupDidStop(_ peerGroup: PeerGroup)
     func peerGroupDidReceiveTransaction(_ peerGroup: PeerGroup)
+    func peerGroupDidChanged(_ state: PeerState)
 }
 
 extension PeerGroupDelegate {
     public func peerGroupDidStart(_ peerGroup: PeerGroup) {}
     public func peerGroupDidStop(_ peerGroup: PeerGroup) {}
     public func peerGroupDidReceiveTransaction(_ peerGroup: PeerGroup) {}
+    public func peerGroupDidChanged(_ state: PeerState) {}
+}
+
+public enum PeerState {
+    case synced
+    case syncing(progress: Double)
+    case notSynced
 }
