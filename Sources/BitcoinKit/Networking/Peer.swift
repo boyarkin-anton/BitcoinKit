@@ -68,6 +68,9 @@ public class Peer: NSObject, StreamDelegate {
         var isSyncing = false
         var inventoryItems = [Data: InventoryItem]()
         var blocks = [Data: Int32]()
+        
+        var onlyCheckpoints = false
+        var checkpoints = [Checkpoint]()
     }
 
     private var readStream: Unmanaged<CFReadStream>?
@@ -151,11 +154,12 @@ public class Peer: NSObject, StreamDelegate {
         self.delegate?.peerDidDisconnect(self)
     }
 
-    public func startSync(filters: [Data] = [], latestBlockHash: Data, latestBlockHeight: Int32) {
+    public func startSync(filters: [Data] = [], latestBlockHash: Data, latestBlockHeight: Int32, onlyCheckpoints: Bool = false) {
         self.latestBlockHash = latestBlockHash
         self.context.currentHeight = latestBlockHeight
         self.context.startHeight = latestBlockHeight
         context.isSyncing = true
+        context.onlyCheckpoints = onlyCheckpoints
 
         if !self.context.sentFilterLoad {
             sendFilterLoadMessage(filters: filters)
@@ -450,12 +454,26 @@ public class Peer: NSObject, StreamDelegate {
         guard !filterdItems.isEmpty else {
             return
         }
-        sendGetDataMessage(message: InventoryMessage(count: VarInt(filterdItems.count), inventoryItems: filterdItems))
+        
         for item in filterdItems {
             let blockHash = Data(item.hash.reversed())
             context.currentHeight += 1
-            context.inventoryItems[blockHash] = item
-            context.blocks[blockHash] = context.currentHeight
+            
+            if context.onlyCheckpoints {
+                latestBlockHash = item.hash
+            } else {
+                context.inventoryItems[blockHash] = item
+                context.blocks[blockHash] = context.currentHeight
+            }
+        }
+        
+        if context.onlyCheckpoints {
+            let latestCheckpoint = Checkpoint(height: context.currentHeight, hash: latestBlockHash)
+            delegate?.peer(self, didReceiveCheckpoint: latestCheckpoint)
+            
+            sendGetBlocksMessage()
+        } else {
+            sendGetDataMessage(message: InventoryMessage(count: VarInt(filterdItems.count), inventoryItems: filterdItems))
         }
         
         if context.currentHeight < context.estimatedHeight {
@@ -535,6 +553,8 @@ public protocol PeerDelegate: class {
     func peer(_ peer: Peer, didReceiveTransaction transaction: Transaction, hash: Data)
     func peer(_ peer: Peer, didReceiveRejectMessage message: RejectMessage)
     func peer(_ peer: Peer, didChangedState state: PeerState)
+    
+    func peer(_ peer: Peer, didReceiveCheckpoint: Checkpoint)
 }
 
 extension PeerDelegate {
@@ -549,4 +569,6 @@ extension PeerDelegate {
     public func peer(_ peer: Peer, didReceiveTransaction transaction: Transaction, hash: Data) {}
     public func peer(_ peer: Peer, didReceiveRejectMessage message: RejectMessage) {}
     public func peer(_ peer: Peer, didChangedState state: PeerState) {}
+    
+    public func peer(_ peer: Peer, didReceiveCheckpoint: Checkpoint) {}
 }

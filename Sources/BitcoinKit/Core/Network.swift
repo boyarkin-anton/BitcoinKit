@@ -59,12 +59,12 @@ extension Network: Equatable {
 }
 
 public struct Checkpoint {
-    let height: Int32
-    let hash: Data
-    let timestamp: UInt32
-    let target: UInt32
+    public let height: Int32
+    public let hash: Data
+    public let timestamp: UInt32?
+    public let target: UInt32?
     
-    public init(height: Int32, hash: Data, timestamp: UInt32, target: UInt32) {
+    public init(height: Int32, hash: Data, timestamp: UInt32? = nil, target: UInt32? = nil) {
         self.height = height
         self.hash = hash
         self.timestamp = timestamp
