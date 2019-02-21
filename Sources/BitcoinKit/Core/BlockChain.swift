@@ -42,8 +42,8 @@ public class BlockChain {
         try blockStore.addMerkleBlock(merkleBlock, hash: hash, height: height)
     }
 
-    public func addTransaction(_ transaction: Transaction, hash: Data) throws {
-        try blockStore.addTransaction(transaction, hash: hash)
+    public func addTransaction(_ transaction: Transaction, hash: Data, isProcessing: Bool) throws {
+        try blockStore.addTransaction(transaction, hash: hash, isProcessing: isProcessing)
     }
 
     public func calculateBalance(address: Address) throws -> Int64 {

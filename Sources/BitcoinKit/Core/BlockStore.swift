@@ -70,7 +70,7 @@ extension Payment: Equatable {
 public protocol BlockStore {
     func addBlock(_ block: BlockMessage, hash: Data) throws
     func addMerkleBlock(_ merkleBlock: MerkleBlockMessage, hash: Data, height: Int32) throws
-    func addTransaction(_ transaction: Transaction, hash: Data) throws
+    func addTransaction(_ transaction: Transaction, hash: Data, isProcessing: Bool) throws
     func calculateBalance(address: Address) throws -> Int64
     func latestBlockHash() throws -> Data?
     func latestBlockHeight() throws -> Int32?
@@ -146,6 +146,7 @@ public class SQLiteBlockStore: BlockStore {
                     t.column("tx_in_count", .integer).notNull()
                     t.column("tx_out_count", .integer).notNull()
                     t.column("lock_time", .integer).notNull()
+                    t.column("isProcessing", .boolean).notNull()
                     t.primaryKey(["id"])
                 }
                 
@@ -205,7 +206,8 @@ CREATE VIEW IF NOT EXISTS view_utxo AS
            LEFT JOIN
            txin AS spent_tx ON spent_tx.txout_id = txout.tx_id AND
                                spent_tx.txout_index = txout.out_index
-     WHERE spent_id IS NULL;
+     WHERE spent_id IS NULL
+     GROUP BY tx.id;
 
 CREATE VIEW IF NOT EXISTS view_tx_fees AS
     SELECT input.id,
@@ -259,9 +261,9 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
                 
                 statements["addTransaction"] = """
                 REPLACE INTO tx
-                (id, version, flag, tx_in_count, tx_out_count, lock_time)
+                (id, version, flag, tx_in_count, tx_out_count, lock_time, isProcessing)
                 VALUES
-                (?,  ?,       ?,    ?,           ?,            ?);
+                (?,  ?,       ?,    ?,           ?,            ?,         ?);
                 """
                 
                 statements["addTransactionInput"] = """
@@ -383,7 +385,7 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
         }
     }
     
-    public func addTransaction(_ transaction: BitcoinKit.Transaction, hash: Data) throws {
+    public func addTransaction(_ transaction: BitcoinKit.Transaction, hash: Data, isProcessing: Bool) throws {
         guard let sql = statements["addTransaction"] else {
             print("sql query for \(#function) not found")
             return
@@ -397,7 +399,8 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
                 0, // Not supported 'flag' currently
                 Int64(transaction.txInCount.underlyingValue),
                 Int64(transaction.txOutCount.underlyingValue),
-                Int64(transaction.lockTime)
+                Int64(transaction.lockTime),
+                isProcessing
                 ])
         }
         try deleteTransactionInput(txId: hash)

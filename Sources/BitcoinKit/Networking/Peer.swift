@@ -170,12 +170,6 @@ public class Peer: NSObject, StreamDelegate {
             }
         }
         self.sendGetBlocksMessage()
-        
-        if context.currentHeight < context.estimatedHeight {
-            delegate?.peer(self, didChangedState: PeerState.syncing(progress: 0))
-        } else {
-            delegate?.peer(self, didChangedState: .synced)
-        }
     }
 
     public func sendTransaction(transaction: Transaction) {
@@ -387,6 +381,10 @@ public class Peer: NSObject, StreamDelegate {
     private func handleVersionMessage(payload: Data) {
         let version = VersionMessage.deserialize(payload)
         context.estimatedHeight = version.startHeight ?? 0
+        
+        if context.currentHeight >= context.estimatedHeight {
+            delegate?.peer(self, didChangedState: .synced)
+        }
 
         log("got version \(version.version), useragent: \(version.userAgent?.value ?? ""), services: \(ServiceFlags(rawValue: version.services))")
         delegate?.peer(self, didReceiveVersionMessage: version)
@@ -447,15 +445,19 @@ public class Peer: NSObject, StreamDelegate {
         // 1. filteredBlockMessageとtransactionsは受け取る
         let transactionItems: [InventoryItem] = inventory.inventoryItems.filter { $0.objectType == .transactionMessage }
         let blockItems: [InventoryItem] = inventory.inventoryItems
-            .filter { $0.objectType == .blockMessage || $0.objectType == .filteredBlockMessage }
+            .filter { $0.objectType == .blockMessage }
             .map { InventoryItem(type: InventoryItem.ObjectType.filteredBlockMessage.rawValue, hash: $0.hash) }
-        let filterdItems: [InventoryItem] = transactionItems + blockItems
+        let filteredBlockItems = inventory.inventoryItems
+            .filter { $0.objectType == .filteredBlockMessage }
+            .map { InventoryItem(type: InventoryItem.ObjectType.filteredBlockMessage.rawValue, hash: $0.hash) }
+        
+        let filterdItems: [InventoryItem] = transactionItems + blockItems + filteredBlockItems
 
         guard !filterdItems.isEmpty else {
             return
         }
         
-        for item in filterdItems {
+        for item in blockItems {
             let blockHash = Data(item.hash.reversed())
             context.currentHeight += 1
             
@@ -465,6 +467,12 @@ public class Peer: NSObject, StreamDelegate {
                 context.inventoryItems[blockHash] = item
                 context.blocks[blockHash] = context.currentHeight
             }
+        }
+        
+        for item in filterdItems {
+            let blockHash = Data(item.hash.reversed())
+
+            context.inventoryItems[blockHash] = item
         }
         
         if context.onlyCheckpoints {

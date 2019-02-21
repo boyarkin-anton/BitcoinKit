@@ -85,6 +85,7 @@ public class PeerGroup: PeerDelegate {
         if let peer = peers.values.first {
             peersQueue.async {
                 peer.sendTransaction(transaction: transaction)
+                try! self.blockChain.addTransaction(transaction, hash: Data(transaction.txHash.reversed()), isProcessing: true)
             }
         } else {
             transactions.append(transaction)
@@ -102,6 +103,7 @@ public class PeerGroup: PeerDelegate {
             if !self.transactions.isEmpty {
                 for transaction in self.transactions {
                     peer.sendTransaction(transaction: transaction)
+                    try! self.blockChain.addTransaction(transaction, hash: Data(transaction.txHash.reversed()), isProcessing: true)
                 }
             }
         }
@@ -126,7 +128,7 @@ public class PeerGroup: PeerDelegate {
     }
 
     public func peer(_ peer: Peer, didReceiveTransaction transaction: Transaction, hash: Data) {
-        try! blockChain.addTransaction(transaction, hash: hash)
+        try! blockChain.addTransaction(transaction, hash: hash, isProcessing: false)
         delegate?.peerGroupDidReceiveTransaction(self)
     }
     
