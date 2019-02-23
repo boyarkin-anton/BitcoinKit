@@ -77,3 +77,31 @@ public struct BlockHeader {
     /// Number of transaction entries
     public let transactionCount: VarInt
     
+    public func serialized() -> Data {
+        var data = Data()
+        data += version
+        data += prevBlock
+        data += merkleRoot
+        data += timestamp
+        data += bits
+        data += nonce
+        data += transactionCount.serialized()
+        return data
+    }
+    
+    public static func deserialize(_ data: Data) -> BlockHeader {
+        let byteStream = ByteStream(data)
+        return deserialize(byteStream)
+    }
+    
+    static func deserialize(_ byteStream: ByteStream) -> BlockHeader {
+        let version = byteStream.read(Int32.self)
+        let prevBlock = byteStream.read(Data.self, count: 32)
+        let merkleRoot = byteStream.read(Data.self, count: 32)
+        let timestamp = byteStream.read(UInt32.self)
+        let bits = byteStream.read(UInt32.self)
+        let nonce = byteStream.read(UInt32.self)
+        let transactionCount = byteStream.read(VarInt.self)
+        return BlockHeader(version: version, prevBlock: prevBlock, merkleRoot: merkleRoot, timestamp: timestamp, bits: bits, nonce: nonce, transactionCount: transactionCount)
+    }
+}
