@@ -34,7 +34,7 @@ public struct HeadersMessage {
         return VarInt(headers.count)
     }
     /// Block headers
-    public let headers: [BlockMessage]
+    public let headers: [BlockHeader]
 
     public func serialized() -> Data {
         var data = Data()
@@ -52,14 +52,28 @@ public struct HeadersMessage {
         guard countValue <= MAX_HEADERS else {
             throw ProtocolError.error("Too many headers: got \(countValue) which is larger than \(MAX_HEADERS)")
         }
-        var blockHeaders = [BlockMessage]()
+        var blockHeaders = [BlockHeader]()
         for _ in 0..<countValue {
-            let blockHeader: BlockMessage = BlockMessage.deserialize(byteStream)
-            guard blockHeader.transactions.isEmpty else {
-                throw ProtocolError.error("Block header does not have transaction")
-            }
+            let blockHeader: BlockHeader = BlockHeader.deserialize(byteStream)
             blockHeaders.append(blockHeader)
         }
         return HeadersMessage(headers: blockHeaders)
     }
 }
+
+public struct BlockHeader {
+    /// Block version information (note, this is signed)
+    public let version: Int32
+    /// The hash value of the previous block this particular block references
+    public let prevBlock: Data
+    /// The reference to a Merkle tree collection which is a hash of all transactions related to this block
+    public let merkleRoot: Data
+    /// A Unix timestamp recording when this block was created (Currently limited to dates before the year 2106!)
+    public let timestamp: UInt32
+    /// The calculated difficulty target being used for this block
+    public let bits: UInt32
+    /// The nonce used to generate this block… to allow variations of the header and compute different hashes
+    public let nonce: UInt32
+    /// Number of transaction entries
+    public let transactionCount: VarInt
+    

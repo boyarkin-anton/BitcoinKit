@@ -155,11 +155,16 @@ public class Peer: NSObject, StreamDelegate {
     }
 
     public func startSync(filters: [Data] = [], latestBlockHash: Data, latestBlockHeight: Int32, onlyCheckpoints: Bool = false) {
+        let hash = Data(latestBlockHash.reversed())
+        log("Start from: \(latestBlockHeight) = \(hash.hex)")
+        
         self.latestBlockHash = latestBlockHash
         self.context.currentHeight = latestBlockHeight
         self.context.startHeight = latestBlockHeight
         context.isSyncing = true
         context.onlyCheckpoints = onlyCheckpoints
+        
+        context.blocks[hash] = latestBlockHeight
 
         if !self.context.sentFilterLoad {
             sendFilterLoadMessage(filters: filters)
@@ -169,7 +174,16 @@ public class Peer: NSObject, StreamDelegate {
                 self.context.sentMemPool = true
             }
         }
-        self.sendGetBlocksMessage()
+        
+        if onlyCheckpoints {
+            self.sendGetHeaderMessage()
+        } else {
+            self.sendGetBlocksMessage()
+        }
+        
+        if (context.estimatedHeight-context.currentHeight < 5) {
+            delegate?.peer(self, didChangedState: .synced)
+        }
     }
 
     public func sendTransaction(transaction: Transaction) {
@@ -356,6 +370,17 @@ public class Peer: NSObject, StreamDelegate {
         let message = Message(magic: network.magic, command: "getblocks", length: UInt32(payload.count), checksum: checksum, payload: payload)
         sendMessage(message)
     }
+    
+    private func sendGetHeaderMessage() {
+        let blockLocatorHash = latestBlockHash
+        let getBlocks = GetHeadersMessage(version: UInt32(protocolVersion), hashCount: 1, blockLocatorHashes: blockLocatorHash, hashStop: Data(count: 32))
+        
+        let payload = getBlocks.serialized()
+        let checksum = Data(Crypto.sha256sha256(payload).prefix(4))
+        
+        let message = Message(magic: network.magic, command: "getheaders", length: UInt32(payload.count), checksum: checksum, payload: payload)
+        sendMessage(message)
+    }
 
     private func sendGetDataMessage(message: InventoryMessage) {
         let payload = message.serialized()
@@ -381,10 +406,6 @@ public class Peer: NSObject, StreamDelegate {
     private func handleVersionMessage(payload: Data) {
         let version = VersionMessage.deserialize(payload)
         context.estimatedHeight = version.startHeight ?? 0
-        
-        if context.currentHeight >= context.estimatedHeight {
-            delegate?.peer(self, didChangedState: .synced)
-        }
 
         log("got version \(version.version), useragent: \(version.userAgent?.value ?? ""), services: \(ServiceFlags(rawValue: version.services))")
         delegate?.peer(self, didReceiveVersionMessage: version)
@@ -446,27 +467,20 @@ public class Peer: NSObject, StreamDelegate {
         let transactionItems: [InventoryItem] = inventory.inventoryItems.filter { $0.objectType == .transactionMessage }
         let blockItems: [InventoryItem] = inventory.inventoryItems
             .filter { $0.objectType == .blockMessage }
-            .map { InventoryItem(type: InventoryItem.ObjectType.filteredBlockMessage.rawValue, hash: $0.hash) }
+            .map { InventoryItem(type: InventoryItem.ObjectType.blockMessage.rawValue, hash: $0.hash) }
         let filteredBlockItems = inventory.inventoryItems
-            .filter { $0.objectType == .filteredBlockMessage }
+            .filter { $0.objectType == .blockMessage || $0.objectType == .filteredBlockMessage }
             .map { InventoryItem(type: InventoryItem.ObjectType.filteredBlockMessage.rawValue, hash: $0.hash) }
         
-        let filterdItems: [InventoryItem] = transactionItems + blockItems + filteredBlockItems
+        let filterdItems: [InventoryItem] = transactionItems + filteredBlockItems
 
         guard !filterdItems.isEmpty else {
             return
         }
         
-        for item in blockItems {
-            let blockHash = Data(item.hash.reversed())
-            context.currentHeight += 1
-            
-            if context.onlyCheckpoints {
-                latestBlockHash = item.hash
-            } else {
-                context.inventoryItems[blockHash] = item
-                context.blocks[blockHash] = context.currentHeight
-            }
+        if context.onlyCheckpoints {
+            latestBlockHash = blockItems.last?.hash ?? latestBlockHash
+            context.currentHeight += Int32(blockItems.count)
         }
         
         for item in filterdItems {
@@ -484,11 +498,13 @@ public class Peer: NSObject, StreamDelegate {
             sendGetDataMessage(message: InventoryMessage(count: VarInt(filterdItems.count), inventoryItems: filterdItems))
         }
         
-        if context.currentHeight < context.estimatedHeight {
-            let progress: Double =  Double(context.currentHeight - context.startHeight) / Double(context.estimatedHeight - context.startHeight)
-            delegate?.peer(self, didChangedState: .syncing(progress: progress))
-        } else {
-            delegate?.peer(self, didChangedState: .synced)
+        if context.onlyCheckpoints {
+            if context.currentHeight < context.estimatedHeight {
+                let progress: Double =  Double(context.currentHeight - context.startHeight) / Double(context.estimatedHeight - context.startHeight)
+                delegate?.peer(self, didChangedState: .syncing(progress: progress))
+            } else {
+                delegate?.peer(self, didChangedState: .synced)
+            }
         }
     }
 
@@ -508,8 +524,20 @@ public class Peer: NSObject, StreamDelegate {
     private func handleMerkleBlockMessage(payload: Data) {
         let merkleBlock = MerkleBlockMessage.deserialize(payload)
         let blockHash = Crypto.sha256sha256(payload.prefix(80))
-        let blockHeight = context.blocks[Data(blockHash.reversed())] ?? 0
-        delegate?.peer(self, didReceiveMerkleBlockMessage: merkleBlock, hash: blockHash, height: blockHeight)
+        
+        if let blockHeight = context.blocks[Data(merkleBlock.prevBlock.reversed())] {
+            context.currentHeight = blockHeight + 1
+            context.blocks[Data(blockHash.reversed())] = context.currentHeight
+            
+            delegate?.peer(self, didReceiveMerkleBlockMessage: merkleBlock, hash: blockHash, height: context.currentHeight)
+            
+            if context.currentHeight < context.estimatedHeight {
+                let progress: Double =  Double(context.currentHeight - context.startHeight) / Double(context.estimatedHeight - context.startHeight)
+                delegate?.peer(self, didChangedState: .syncing(progress: progress))
+            } else {
+                delegate?.peer(self, didChangedState: .synced)
+            }
+        }
 
         context.inventoryItems[Data(blockHash.reversed())] = nil
         if context.inventoryItems.isEmpty {

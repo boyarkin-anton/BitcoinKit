@@ -34,8 +34,8 @@ public class BlockChain {
         self.blockStore = blockStore
     }
 
-    public func addBlock(_ block: BlockMessage, hash: Data) throws {
-        try blockStore.addBlock(block, hash: hash)
+    public func addBlock(_ block: BlockMessage, hash: Data, height: Int32) throws {
+        try blockStore.addBlock(block, hash: hash, height: height)
     }
 
     public func addMerkleBlock(_ merkleBlock: MerkleBlockMessage, hash: Data, height: Int32) throws {

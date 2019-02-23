@@ -122,6 +122,10 @@ public class PeerGroup: PeerDelegate {
             }
         }
     }
+    
+    public func peer(_ peer: Peer, didReceiveBlockMessage message: BlockMessage, hash: Data, height: Int32) {
+        try! blockChain.addBlock(message, hash: hash, height: height)
+    }
 
     public func peer(_ peer: Peer, didReceiveMerkleBlockMessage message: MerkleBlockMessage, hash: Data, height: Int32) {
         try! blockChain.addMerkleBlock(message, hash: hash, height: height)

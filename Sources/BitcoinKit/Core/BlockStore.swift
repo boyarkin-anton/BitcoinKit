@@ -42,19 +42,19 @@ public struct Payment {
     public let from: Address
     public let to: Address
     public let txid: String
-    public let lockTime: Int64
-    public let timestamp: Int64?
+    public let blockHeight: Int64
+    public let timestamp: Int64
     public let confirmations: Int64
     public let fee: Int64?
     
-    public init(state: State, index: Int64, amount: Int64, from: Address, to: Address, txid: String, lockTime: Int64, timestamp: Int64?, confirmations: Int64, fee: Int64?) {
+    public init(state: State, index: Int64, amount: Int64, from: Address, to: Address, txid: String, blockHeight: Int64, timestamp: Int64, confirmations: Int64, fee: Int64?) {
         self.state = state
         self.index = index
         self.amount = amount
         self.from = from
         self.to = to
         self.txid = txid
-        self.lockTime = lockTime
+        self.blockHeight = blockHeight
         self.timestamp = timestamp
         self.confirmations = confirmations
         self.fee = fee
@@ -68,7 +68,7 @@ extension Payment: Equatable {
 }
 
 public protocol BlockStore {
-    func addBlock(_ block: BlockMessage, hash: Data) throws
+    func addBlock(_ block: BlockMessage, hash: Data, height: Int32) throws
     func addMerkleBlock(_ merkleBlock: MerkleBlockMessage, hash: Data, height: Int32) throws
     func addTransaction(_ transaction: Transaction, hash: Data, isProcessing: Bool) throws
     func calculateBalance(address: Address) throws -> Int64
@@ -111,28 +111,29 @@ public class SQLiteBlockStore: BlockStore {
             try dbPool?.write { db in
                 
                 try db.create(table: "block", ifNotExists: true) { t in
-                    t.column("id", .blob).notNull()
+                    t.column("id", .text).notNull()
                     t.column("version", .integer).notNull()
-                    t.column("prev_block", .blob).notNull()
+                    t.column("prev_block", .text).notNull()
                     t.column("merkle_root", .blob).notNull()
                     t.column("timestamp", .integer).notNull()
                     t.column("bits", .integer).notNull()
                     t.column("nonce", .integer).notNull()
                     t.column("txn_count", .integer).notNull()
+                    t.column("height", .integer).notNull()
                     t.primaryKey(["id"])
                 }
                 
                 try db.create(table: "merkleblock", ifNotExists: true) { t in
-                    t.column("id", .blob).notNull()
+                    t.column("id", .text).notNull()
                     t.column("version", .integer).notNull()
-                    t.column("prev_block", .blob).notNull()
+                    t.column("prev_block", .text).notNull()
                     t.column("merkle_root", .blob).notNull()
                     t.column("timestamp", .integer).notNull()
                     t.column("bits", .integer).notNull()
                     t.column("nonce", .integer).notNull()
                     t.column("total_transactions", .integer).notNull()
                     t.column("hash_count", .integer).notNull()
-                    t.column("hashes", .blob).notNull()
+                    t.column("hashes", .text).notNull()
                     t.column("flag_count", .integer).notNull()
                     t.column("flags", .blob).notNull()
                     t.column("height", .integer).notNull()
@@ -179,15 +180,15 @@ CREATE VIEW IF NOT EXISTS view_tx AS
            txout.address_id AS out_address,
            txout.out_index,
            txout.value,
-           tx.lock_time,
+           merkleblock.height,
            merkleblock.timestamp
       FROM tx
            LEFT JOIN
            txout ON tx.id = txout.tx_id
            LEFT JOIN
            txin ON tx.id = txin.tx_id
-           LEFT JOIN
-           merkleblock ON tx.lock_time = merkleblock.height
+           LEFT OUTER JOIN
+           merkleblock ON merkleblock.hashes LIKE '%' || tx.id || '%'
      WHERE in_address != out_address;
 
 CREATE VIEW IF NOT EXISTS view_utxo AS
@@ -195,14 +196,10 @@ CREATE VIEW IF NOT EXISTS view_utxo AS
            txout.address_id AS out_address,
            txout.out_index,
            txout.value,
-           tx.lock_time,
-           merkleblock.timestamp,
            spent_tx.tx_id AS spent_id
       FROM tx
            LEFT JOIN
            txout ON tx.id = txout.tx_id
-           LEFT JOIN
-           merkleblock ON tx.lock_time = merkleblock.height
            LEFT JOIN
            txin AS spent_tx ON spent_tx.txout_id = txout.tx_id AND
                                spent_tx.txout_index = txout.out_index
@@ -216,40 +213,50 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
            out_value,
            in_value - out_value AS fee
       FROM (
-               SELECT tx.id AS id,
-                      sum(txout.value) AS out_value,
-                      txout.address_id AS out_address
-                 FROM tx
-                      LEFT JOIN
-                      txout ON tx.id = txout.tx_id
-                WHERE out_address IS NOT ""
-                GROUP BY tx.id
+               SELECT id,
+                      address AS in_address,
+                      sum(value) AS in_value
+                 FROM (
+                          SELECT DISTINCT tx.id AS id,
+                                          prev.address_id AS address,
+                                          prev.value AS value
+                            FROM tx
+                                 LEFT JOIN
+                                 txin ON tx.id = txin.tx_id
+                                 LEFT JOIN
+                                 txout AS prev ON prev.tx_id = txin.txout_id AND
+                                                  prev.out_index = txin.txout_index
+                           WHERE address IS NOT NULL
+                      )
+                GROUP BY id
            )
-           AS output
+           AS input
            LEFT JOIN
            (
-               SELECT tx.id AS id,
-                      SUM(prev.value) AS in_value,
-                      prev.address_id AS in_address
-                 FROM tx
-                      LEFT JOIN
-                      txin ON tx.id = txin.tx_id
-                      LEFT JOIN
-                      txout AS prev ON prev.tx_id = txin.txout_id AND
-                                       prev.out_index = txin.txout_index
-                WHERE in_address IS NOT NULL
-                GROUP BY tx.id
+               SELECT id,
+                      address AS out_address,
+                      sum(value) AS out_value
+                 FROM (
+                          SELECT DISTINCT tx.id AS id,
+                                          address_id AS address,
+                                          value AS value
+                            FROM tx
+                                 LEFT JOIN
+                                 txout ON tx.id = txout.tx_id
+                           WHERE address IS NOT ""
+                      )
+                GROUP BY id
            )
-           AS input ON input.id = output.id
+           AS output ON input.id = output.id
      WHERE fee IS NOT NULL;
 """
                 )
                 
                 statements["addBlock"] = """
                 REPLACE INTO block
-                (id, version, prev_block, merkle_root, timestamp, bits, nonce, txn_count)
+                (id, version, prev_block, merkle_root, timestamp, bits, nonce, txn_count, height)
                 VALUES
-                (?,  ?,       ?,          ?,           ?,         ?,    ?,     ?);
+                (?,  ?,       ?,          ?,           ?,         ?,    ?,     ?,         ?);
                 """
                 
                 statements["addMerkleBlock"] = """
@@ -305,7 +312,7 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
                 """
                 
                 statements["transactions"] = """
-                SELECT * FROM view_tx WHERE in_address != out_address AND (in_address == ? OR out_address == ?) GROUP BY id ORDER BY lock_time DESC;
+                SELECT * FROM view_tx WHERE in_address != out_address AND (in_address == ? OR out_address == ?) GROUP BY id ORDER BY timestamp DESC;
                 """
                 
                 statements["latestBlockHash"] = """
@@ -334,23 +341,24 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
         }
     }
     
-    public func addBlock(_ block: BlockMessage, hash: Data) throws {
+    public func addBlock(_ block: BlockMessage, hash: Data, height: Int32) throws {
         guard let sql = statements["addBlock"] else {
             print("sql query for \(#function) not found")
             return
         }
-        
+        let height = 0
         try dbPool?.write { db in
             let stmt = try db.cachedUpdateStatement(sql)
             try stmt.execute(arguments: [
-                hash,
+                Data(hash.reversed()).hex,
                 Int64(block.version),
-                block.prevBlock,
+                Data(block.prevBlock.reversed()).hex,
                 block.merkleRoot,
                 Int64(block.timestamp),
                 Int64(block.bits),
                 Int64(block.nonce),
-                Int64(block.transactionCount.underlyingValue)
+                Int64(block.transactionCount.underlyingValue),
+                Int64(height)
                 ])
         }
     }
@@ -361,23 +369,23 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
             return
         }
         
-        let hashes = Data(merkleBlock.hashes.flatMap { $0 })
+        let hashes = Data(merkleBlock.hashes.flatMap { Data($0.reversed()) })
         let flags = Data(merkleBlock.flags)
         
         try dbPool?.write { db in
             let stmt = try db.cachedUpdateStatement(sql)
             
             try stmt.execute(arguments: [
-                hash,
+                Data(hash.reversed()).hex,
                 Int64(merkleBlock.version),
-                merkleBlock.prevBlock,
+                Data(merkleBlock.prevBlock.reversed()).hex,
                 merkleBlock.merkleRoot,
                 Int64(merkleBlock.timestamp),
                 Int64(merkleBlock.bits),
                 Int64(merkleBlock.nonce),
                 Int64(merkleBlock.totalTransactions),
                 Int64(merkleBlock.numberOfHashes.underlyingValue),
-                hashes,
+                hashes.hex,
                 Int64(merkleBlock.numberOfFlags.underlyingValue),
                 flags,
                 Int64(height)
@@ -479,8 +487,8 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
             let stmt = try db.cachedSelectStatement(sql)
             
             if let row = try Row.fetchOne(stmt) {
-                if let value = Data.fromDatabaseValue(row[0]){
-                    return value
+                if let value = String.fromDatabaseValue(row[0]), let data = Data(hex: value) {
+                    return Data(data.reversed())
                 }
             }
             return nil
@@ -599,21 +607,21 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
                     let outAddress = String.fromDatabaseValue(row[2]),
                     let outIndex = Int64.fromDatabaseValue(row[3]),
                     let value = Int64.fromDatabaseValue(row[4]),
-                    let lockTime = Int64.fromDatabaseValue(row[5]) {
-                    let timestamp = Int64.fromDatabaseValue(row[6])
+                    let blockHeight = Int64.fromDatabaseValue(row[5]),
+                    let timestamp = Int64.fromDatabaseValue(row[6]) {
                     
                     let from = try! AddressFactory.create(inAddress)
                     let to = try! AddressFactory.create(outAddress)
                     let state: Payment.State = (outAddress == address.base58) ? .received : .sent
                     
                     var confirmations: Int64 = 0
-                    if case 1..<500000000 = lockTime, lastHeight > lockTime {
-                        confirmations = Int64(lastHeight) - lockTime
+                    if lastHeight > blockHeight {
+                        confirmations = Int64(lastHeight) - blockHeight
                     }
                     
                     let fee = try self.getTransactionFee(for: txid, in: db)
                     
-                    payments.append(Payment(state: state, index: outIndex, amount: value, from: from, to: to, txid: txid, lockTime: lockTime, timestamp: timestamp, confirmations: confirmations, fee: fee))
+                    payments.append(Payment(state: state, index: outIndex, amount: value, from: from, to: to, txid: txid, blockHeight: blockHeight, timestamp: timestamp, confirmations: confirmations, fee: fee))
                 }
             }
             
@@ -627,8 +635,6 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
             return [Payment]()
         }
         
-        let lastHeight = try latestBlockHeight() ?? 0
-        
         return try dbPool?.read { db -> [Payment] in
             let stmt = try db.cachedSelectStatement(sql)
             stmt.arguments = [address.base58]
@@ -639,22 +645,11 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
                 if let txid = String.fromDatabaseValue(row[0]),
                     let outAddress = String.fromDatabaseValue(row[1]),
                     let outIndex = Int64.fromDatabaseValue(row[2]),
-                    let value = Int64.fromDatabaseValue(row[3]),
-                    let lockTime = Int64.fromDatabaseValue(row[4]) {
-                    let timestamp = Int64.fromDatabaseValue(row[5])
+                    let value = Int64.fromDatabaseValue(row[3]) {
                     
-                    let from = try! AddressFactory.create(outAddress)
-                    let to = try! AddressFactory.create(outAddress)
-                    let state: Payment.State = .received
+                    let address = try! AddressFactory.create(outAddress)
                     
-                    var confirmations: Int64 = 0
-                    if case 1..<500000000 = lockTime, lastHeight > lockTime {
-                        confirmations = Int64(lastHeight) - lockTime
-                    }
-                    
-                    let fee = try self.getTransactionFee(for: txid, in: db)
-                    
-                    payments.append(Payment(state: state, index: outIndex, amount: value, from: from, to: to, txid: txid, lockTime: lockTime, timestamp: timestamp, confirmations: confirmations, fee: fee))
+                    payments.append(Payment(state: .received, index: outIndex, amount: value, from: address, to: address, txid: txid, blockHeight: 0, timestamp: 0, confirmations: 0, fee: 0))
                 }
             }
             
@@ -679,22 +674,23 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
                     let inAddress = String.fromDatabaseValue(row[1]),
                     let outAddress = String.fromDatabaseValue(row[2]),
                     let outIndex = Int64.fromDatabaseValue(row[3]),
-                    let value = Int64.fromDatabaseValue(row[4]),
-                    let lockTime = Int64.fromDatabaseValue(row[5]) {
-                    let timestamp = Int64.fromDatabaseValue(row[6])
+                    let value = Int64.fromDatabaseValue(row[4]) {
+                    
+                    let blockHeight = Int64.fromDatabaseValue(row[5]) ?? -1
+                    let timestamp = Int64.fromDatabaseValue(row[6]) ?? -1
                     
                     let from = try! AddressFactory.create(inAddress)
                     let to = try! AddressFactory.create(outAddress)
                     let state: Payment.State = .unknown
                     
                     var confirmations: Int64 = 0
-                    if case 1..<500000000 = lockTime, lastHeight > lockTime {
-                        confirmations = Int64(lastHeight) - lockTime
+                    if blockHeight > 0, lastHeight > blockHeight {
+                        confirmations = Int64(lastHeight) - blockHeight
                     }
                     
                     let fee = try self.getTransactionFee(for: hash, in: db)
                     
-                    return Payment(state: state, index: outIndex, amount: value, from: from, to: to, txid: txid, lockTime: lockTime, timestamp: timestamp, confirmations: confirmations, fee: fee)
+                    return Payment(state: state, index: outIndex, amount: value, from: from, to: to, txid: txid, blockHeight: blockHeight, timestamp: timestamp, confirmations: confirmations, fee: fee)
                 }
             }
             
@@ -712,7 +708,7 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
         stmt.arguments = [hash]
         
         if let row = try Row.fetchOne(stmt) {
-            if let value = Int64.fromDatabaseValue(row[1]){
+            if let value = Int64.fromDatabaseValue(row[4]){
                 return value
             }
         }
