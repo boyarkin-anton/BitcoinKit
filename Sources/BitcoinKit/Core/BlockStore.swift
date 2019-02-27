@@ -84,13 +84,11 @@ public class SQLiteBlockStore: BlockStore {
     
     var dbPool: DatabasePool?
     let network: Network
-    var addressConverter: AddressConverter?
     
     private var statements = [String: String]()
     
     public init(network: Network, name: String? = nil, passphrase: String? = nil) {
         self.network = network
-        self.addressConverter = AddressConverter(network: network)
         self.openDB(name: name, passphrase: passphrase)
     }
     
@@ -519,10 +517,7 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
             return
         }
         
-        var address = ""
-        if let addressConverter = self.addressConverter {
-            address = addressConverter.extract(from: input.signatureScript)?.base58 ?? ""
-        }
+        let address = AddressConverter.extract(from: input.signatureScript, with: self.network)?.base58 ?? ""
         
         try dbPool?.write { db in
             let stmt = try db.cachedUpdateStatement(sql)

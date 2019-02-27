@@ -15,37 +15,8 @@ class AddressConverter {
         case wrongAddressPrefix
     }
     
-    let network: Network
     
-    init(network: Network) {
-        self.network = network
-    }
-    
-    func convert(keyHash: Data, type: ScriptType) throws -> Address {
-        let version: UInt8
-        let addressType: AddressType
-        switch type {
-        case .p2pkh, .p2pk:
-            version = network.pubkeyhash
-            addressType = .pubkeyHash
-        case .p2sh, .p2wpkhSh:
-            version = network.scripthash
-            addressType = .scriptHash
-        default: throw ConversionError.unknownAddressType
-        }
-        return try convertToLegacy(keyHash: keyHash, version: version, addressType: addressType)
-    }
-    
-    func convertToLegacy(keyHash: Data, version: UInt8, addressType: AddressType) throws -> LegacyAddress {
-        var withVersion = (Data([version])) + keyHash
-        let doubleSHA256 = Crypto.sha256sha256(withVersion)
-        let checksum = doubleSHA256.prefix(4)
-        withVersion += checksum
-        let base58 = Base58.encode(withVersion)
-        return try LegacyAddress(base58)
-    }
-    
-    func extract(from signatureScript: Data) -> Address? {
+    public static func extract(from signatureScript: Data, with network: Network) -> Address? {
         var payload: Data?
         var validScriptType: ScriptType = ScriptType.unknown
         let sigScriptCount = signatureScript.count
@@ -90,7 +61,7 @@ class AddressConverter {
         }
         if let payload = payload {
             let keyHash = Crypto.sha256ripemd160(payload)
-            if let address = try? convert(keyHash: keyHash, type: validScriptType) {
+            if let address = try? network.convert(keyHash: keyHash, type: validScriptType) {
                 outputAddress = address
             }
         }
