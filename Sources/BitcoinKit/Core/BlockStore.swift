@@ -86,9 +86,11 @@ public class SQLiteBlockStore: BlockStore {
     let network: Network
     
     private var statements = [String: String]()
+    private var isCompact: Bool = false
     
-    public init(network: Network, name: String? = nil, passphrase: String? = nil) {
+    public init(network: Network, name: String? = nil, passphrase: String? = nil, isCompact: Bool = false) {
         self.network = network
+        self.isCompact = isCompact
         self.openDB(name: name, passphrase: passphrase)
     }
     
@@ -123,17 +125,23 @@ public class SQLiteBlockStore: BlockStore {
                 
                 try db.create(table: "merkleblock", ifNotExists: true) { t in
                     t.column("id", .text).notNull()
-                    t.column("version", .integer).notNull()
-                    t.column("prev_block", .text).notNull()
-                    t.column("merkle_root", .blob).notNull()
+                    if !isCompact {
+                        t.column("version", .integer).notNull()
+                        t.column("prev_block", .text).notNull()
+                        t.column("merkle_root", .blob).notNull()
+                    }
                     t.column("timestamp", .integer).notNull()
-                    t.column("bits", .integer).notNull()
-                    t.column("nonce", .integer).notNull()
-                    t.column("total_transactions", .integer).notNull()
-                    t.column("hash_count", .integer).notNull()
+                    if !isCompact {
+                        t.column("bits", .integer).notNull()
+                        t.column("nonce", .integer).notNull()
+                        t.column("total_transactions", .integer).notNull()
+                        t.column("hash_count", .integer).notNull()
+                    }
                     t.column("hashes", .text).notNull()
-                    t.column("flag_count", .integer).notNull()
-                    t.column("flags", .blob).notNull()
+                    if !isCompact {
+                        t.column("flag_count", .integer).notNull()
+                        t.column("flags", .blob).notNull()
+                    }
                     t.column("height", .integer).notNull()
                     t.primaryKey(["id"])
                 }
@@ -256,13 +264,21 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
                 VALUES
                 (?,  ?,       ?,          ?,           ?,         ?,    ?,     ?,         ?);
                 """
-                
-                statements["addMerkleBlock"] = """
-                REPLACE INTO merkleblock
-                (id, version, prev_block, merkle_root, timestamp, bits, nonce, total_transactions, hash_count, hashes, flag_count, flags, height)
-                VALUES
-                (?,  ?,       ?,          ?,           ?,         ?,    ?,     ?,                  ?,          ?,      ?,          ?,     ?);
-                """
+                if isCompact {
+                    statements["addMerkleBlock"] = """
+                    REPLACE INTO merkleblock
+                    (id, timestamp, hashes, height)
+                    VALUES
+                    (?,  ?,         ?,      ?);
+                    """
+                } else {
+                    statements["addMerkleBlock"] = """
+                    REPLACE INTO merkleblock
+                    (id, version, prev_block, merkle_root, timestamp, bits, nonce, total_transactions, hash_count, hashes, flag_count, flags, height)
+                    VALUES
+                    (?,  ?,       ?,          ?,           ?,         ?,    ?,     ?,                  ?,          ?,      ?,          ?,     ?);
+                    """
+                }
                 
                 statements["addTransaction"] = """
                 REPLACE INTO tx
@@ -373,21 +389,30 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
         try dbPool?.write { db in
             let stmt = try db.cachedUpdateStatement(sql)
             
-            try stmt.execute(arguments: [
-                Data(hash.reversed()).hex,
-                Int64(merkleBlock.version),
-                Data(merkleBlock.prevBlock.reversed()).hex,
-                merkleBlock.merkleRoot,
-                Int64(merkleBlock.timestamp),
-                Int64(merkleBlock.bits),
-                Int64(merkleBlock.nonce),
-                Int64(merkleBlock.totalTransactions),
-                Int64(merkleBlock.numberOfHashes.underlyingValue),
-                hashes.hex,
-                Int64(merkleBlock.numberOfFlags.underlyingValue),
-                flags,
-                Int64(height)
-                ])
+            if isCompact {
+                try stmt.execute(arguments: [
+                    Data(hash.reversed()).hex,
+                    Int64(merkleBlock.timestamp),
+                    hashes.hex,
+                    Int64(height)
+                    ])
+            } else {
+                try stmt.execute(arguments: [
+                    Data(hash.reversed()).hex,
+                    Int64(merkleBlock.version),
+                    Data(merkleBlock.prevBlock.reversed()).hex,
+                    merkleBlock.merkleRoot,
+                    Int64(merkleBlock.timestamp),
+                    Int64(merkleBlock.bits),
+                    Int64(merkleBlock.nonce),
+                    Int64(merkleBlock.totalTransactions),
+                    Int64(merkleBlock.numberOfHashes.underlyingValue),
+                    hashes.hex,
+                    Int64(merkleBlock.numberOfFlags.underlyingValue),
+                    flags,
+                    Int64(height)
+                    ])
+            }
         }
     }
     
