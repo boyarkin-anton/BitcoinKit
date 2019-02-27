@@ -36,13 +36,13 @@ public struct Transaction {
         return VarInt(inputs.count)
     }
     /// A list of 1 or more transaction inputs or sources for coins
-    public let inputs: [TransactionInput]
+    public var inputs: [TransactionInput]
     /// Number of Transaction outputs
     public var txOutCount: VarInt {
         return VarInt(outputs.count)
     }
     /// A list of 1 or more transaction outputs or destinations for coins
-    public let outputs: [TransactionOutput]
+    public var outputs: [TransactionOutput]
     /// A list of witnesses, one for each input; omitted if flag is omitted above
     // public let witnesses: [TransactionWitness] // A list of witnesses, one for each input; omitted if flag is omitted above
     /// The block number or timestamp at which this transaction is unlocked:
@@ -72,6 +72,22 @@ public struct Transaction {
         data += outputs.flatMap { $0.serialized() }
         data += lockTime
         return data
+    }
+    
+    public mutating func unpack(with network: Network) {
+        for index in 0..<inputs.count {
+            inputs[index].unpack(with: network)
+        }
+        
+        for index in 0..<outputs.count {
+            outputs[index].unpack(with: network)
+        }
+    }
+    
+    public func isLinked(to address: Cashaddr) -> Bool {
+        let hash = address.base58
+        return inputs.filter { input -> Bool in input.address == hash }.count > 0
+            || outputs.filter { output -> Bool in output.address == hash }.count > 0
     }
 
     public func isCoinbase() -> Bool {

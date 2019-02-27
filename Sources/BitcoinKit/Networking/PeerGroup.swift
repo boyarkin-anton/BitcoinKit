@@ -34,6 +34,7 @@ public class PeerGroup: PeerDelegate {
     var peers = [String: Peer]()
 
     private var filters = [Data]()
+    private var addresses = [Cashaddr]()
     private var transactions = [Transaction]()
     
     private var currentPeerID: Int = 0
@@ -79,6 +80,17 @@ public class PeerGroup: PeerDelegate {
     // filter: pubkey, pubkeyhash, scripthash, etc...
     public func addFilter(_ filter: Data) {
         filters.append(filter)
+    }
+    
+    public func addAddressFilter(_ addresses: [Cashaddr]) {
+        filters.removeAll()
+        self.addresses = addresses
+        for address in addresses {
+            if let publicKey = address.publicKey {
+                filters.append(publicKey)
+            }
+             filters.append(address.data)
+        }
     }
 
     public func sendTransaction(transaction: Transaction) {
@@ -132,7 +144,17 @@ public class PeerGroup: PeerDelegate {
     }
 
     public func peer(_ peer: Peer, didReceiveTransaction transaction: Transaction, hash: Data) {
-        try! blockChain.addTransaction(transaction, hash: hash, isProcessing: false)
+        if addresses.count > 0 {
+            var mTransaction = transaction
+            mTransaction.unpack(with: self.blockChain.network)
+            
+            if addresses.filter({ address -> Bool in mTransaction.isLinked(to: address) }).count > 0 {
+                try! self.blockChain.addTransaction(mTransaction, hash: hash, isProcessing: false)
+            }
+        } else {
+            try! blockChain.addTransaction(transaction, hash: hash, isProcessing: false)
+        }
+        
         delegate?.peerGroupDidReceiveTransaction(self)
     }
     

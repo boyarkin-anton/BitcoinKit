@@ -517,7 +517,12 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
             return
         }
         
-        let address = AddressConverter.extract(from: input.signatureScript, with: self.network)?.base58 ?? ""
+        var address = ""
+        if let unpackedAddress = input.address {
+            address = unpackedAddress
+        } else {
+            address = AddressConverter.extract(from: input.signatureScript, with: self.network)?.base58 ?? ""
+        }
         
         try dbPool?.write { db in
             let stmt = try db.cachedUpdateStatement(sql)
@@ -540,7 +545,9 @@ CREATE VIEW IF NOT EXISTS view_tx_fees AS
         }
         
         var address = ""
-        if Script.isPublicKeyHashOut(output.lockingScript) {
+        if let unpackedAddress = output.address {
+            address = unpackedAddress
+        } else if Script.isPublicKeyHashOut(output.lockingScript) {
             let pubKeyHash = Script.getPublicKeyHash(from: output.lockingScript)
             address = BitcoinKitHelpers.publicKeyToAddress(from: (Data([network.pubkeyhash]) + pubKeyHash))
         }
