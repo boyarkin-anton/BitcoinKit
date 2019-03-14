@@ -112,6 +112,45 @@ public struct LegacyAddress: Address {
             self.cashaddr = ""
         }
     }
+    
+    public init(_ base58: Base58Check, for network: Network) throws {
+        guard let raw = Base58.decode(base58) else {
+            throw AddressError.invalid
+        }
+        let checksum = raw.suffix(4)
+        let pubKeyHash = raw.dropLast(4)
+        let checksumConfirm = Crypto.sha256sha256(pubKeyHash).prefix(4)
+        guard checksum == checksumConfirm else {
+            throw AddressError.invalid
+        }
+        
+        let type: AddressType
+        let addressPrefix = pubKeyHash[0]
+        switch addressPrefix {
+        case network.pubkeyhash:
+            type = .pubkeyHash
+        case network.scripthash:
+            type = .scriptHash
+        default:
+            throw AddressError.invalidVersionByte
+        }
+        
+        self.network = network
+        self.type = type
+        self.publicKey = nil
+        self.data = pubKeyHash.dropFirst()
+        self.base58 = base58
+        
+        // cashaddr
+        switch type {
+        case .pubkeyHash, .scriptHash:
+            let payload = Data([type.versionByte160]) + self.data
+            self.cashaddr = Bech32.encode(payload, prefix: network.scheme)
+        default:
+            self.cashaddr = ""
+        }
+    }
+    
     public init(data: Data, type: AddressType, network: Network) {
         let addressData: Data = [type.versionByte] + data
         self.data = data
