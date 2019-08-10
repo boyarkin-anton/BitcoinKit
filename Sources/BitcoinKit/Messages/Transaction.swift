@@ -151,11 +151,14 @@ public struct Transaction {
         let lockingScriptTo = Script.buildPublicKeyHashOut(pubKeyHash: toPubKeyHash)
         let lockingScriptChange = Script.buildPublicKeyHashOut(pubKeyHash: changePubkeyHash)
         
-        let toOutput = TransactionOutput(value: amount, lockingScript: lockingScriptTo)
-        let changeOutput = TransactionOutput(value: change, lockingScript: lockingScriptChange)
+        var outputs = [TransactionOutput]()
+        outputs.append(TransactionOutput(value: amount, lockingScript: lockingScriptTo))
+        if change > 0 {
+            outputs.append(TransactionOutput(value: change, lockingScript: lockingScriptChange))
+        }
         
         let unsignedInputs = utxos.map { TransactionInput(previousOutput: $0.outpoint, signatureScript: Data(), sequence: UInt32.max) }
-        let tx = BitcoinKit.Transaction(version: 1, inputs: unsignedInputs, outputs: [toOutput, changeOutput], lockTime: lockTime)
+        let tx = BitcoinKit.Transaction(version: 1, inputs: unsignedInputs, outputs: outputs, lockTime: lockTime)
         return UnsignedTransaction(tx: tx, utxos: utxos)
     }
     
