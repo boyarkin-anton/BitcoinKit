@@ -22,7 +22,7 @@ Pod::Spec.new do |spec|
   spec.pod_target_xcconfig = { 'SWIFT_WHOLE_MODULE_OPTIMIZATION' => 'YES',
                                'APPLICATION_EXTENSION_API_ONLY' => 'YES',
                                'OTHER_SWIFT_FLAGS' => '-D BitcoinKitXcode' }
-  spec.dependency 'secp256k1_swift', '~> 1.0.3'
+  spec.dependency 'secp256k1.c', '~> 0.1'
   spec.dependency 'GRKOpenSSLFramework', '~> 1.0.2.15'
   spec.dependency 'GRDB.swift', '~> 3.6.2'
   spec.dependency 'GRDBCipher', '~> 3.6.2'

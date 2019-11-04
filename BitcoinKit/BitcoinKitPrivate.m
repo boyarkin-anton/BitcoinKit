@@ -29,7 +29,7 @@
 #import <openssl/hmac.h>
 #import <openssl/ec.h>
 #import <openssl/bn.h>
-#import <secp256k1_swift/secp256k1.h>
+#import <secp256k1/secp256k1.h>
 
 @implementation _Hash
 
